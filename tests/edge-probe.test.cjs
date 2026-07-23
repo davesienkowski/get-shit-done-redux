@@ -490,3 +490,49 @@ describe('edge-probe: golden fixtures', () => {
     });
   }
 });
+
+// ══ autoResolve — the deterministic `--auto` FLOOR for edge (parity with the UI adapter's
+// ui-consideration-probe autoResolve, #1867 WIRE-01). Codifies the never-dismiss / unclassified-
+// stays-unresolved floor that spec-phase.md's `--auto` step (Step 5.5) previously carried ONLY as
+// prose — making the load-bearing "never auto-dismiss an edge; a missing shape is not evidence an
+// edge exists (#1110)" invariant unit-testable rather than LLM-discretionary. Structured-value
+// assertions only (no source-grep). ═══════════════════════════════════════════════════════════
+const NUMERIC_REQ = { id: 'R1', text: 'Round a number to N decimal places' };
+const ZERO_CUE_REQ = { id: 'Z', text: 'xyzzy plugh frobnicate' };
+
+describe('edge-probe: autoResolve (deterministic --auto never-dismiss floor, #1110 parity with UI)', () => {
+  test('every applicable edge auto-resolves to a backstop with a non-empty resolution; NONE is dismissed', () => {
+    const items = ep.proposeEdges(NUMERIC_REQ);
+    const resolutions = ep.autoResolve(items);
+    assert.equal(resolutions.length, items.length);
+    assert.ok(items.length > 0, 'the numeric requirement must propose at least one edge');
+    for (const r of resolutions) {
+      assert.notEqual(r.status, 'dismissed');
+      assert.equal(r.status, 'resolved');
+      assert.equal(r.verification, 'backstop');
+      assert.equal(typeof r.resolution, 'string');
+      assert.ok(r.resolution.length > 0);
+    }
+  });
+  test('an unclassified edge stays unresolved — never auto-backstopped (a missing shape is not evidence, #1110)', () => {
+    const items = ep.proposeEdges(ZERO_CUE_REQ); // exactly one unclassified item
+    assert.equal(items.length, 1);
+    assert.equal(items[0].category, ep.UNCLASSIFIED_CATEGORY);
+    const [r] = ep.autoResolve(items);
+    assert.equal(r.status, 'unresolved');
+    assert.equal(r.verification, null);
+    assert.equal(r.resolution, null);
+    assert.equal(r.reason, null);
+  });
+  test('autoResolve output validates and merges through probe-core: zero dismissed, byVerification.backstop === applicable', () => {
+    const items = ep.proposeEdges(NUMERIC_REQ);
+    const report = ep.analyzeCoverage([NUMERIC_REQ], ep.autoResolve(items));
+    assert.ok(report.items.every((it) => it.status !== 'dismissed'));
+    assert.equal(report.coverage.resolved, report.coverage.applicable);
+    assert.equal(report.coverage.byVerification.backstop, report.coverage.applicable);
+  });
+  test('autoResolve is deterministic — two calls on the same items deepEqual', () => {
+    const items = ep.proposeEdges(NUMERIC_REQ);
+    assert.deepEqual(ep.autoResolve(items), ep.autoResolve(items));
+  });
+});
