@@ -226,6 +226,34 @@ export function analyzeCoverage(
   return coreAnalyzeCoverage(items, resolutions, EDGE_VALIDATORS);
 }
 
+/**
+ * The deterministic `--auto` resolution FLOOR for the edge adapter — parity with the UI adapter's
+ * `ui-consideration-probe.autoResolve` (#1867 WIRE-01). For each proposed edge:
+ *   - an `unclassified` item stays `unresolved` — NEVER auto-backstopped (a missing shape cue is not
+ *     evidence an edge applies, #1110);
+ *   - every applicable item auto-resolves to a conservative `backstop` (carrying the taxonomy probe
+ *     question as its `resolution` so probe-core's "backstop requires a resolution" check passes);
+ *   - it NEVER emits `dismissed` under any branch — a wrong auto-dismissal is the exact silent failure
+ *     this probe eliminates (the never-dismiss invariant, asserted on the typed return).
+ *
+ * This is the CODE floor only. It codifies what `spec-phase.md` Step 5.5's prose `--auto` rule
+ * already instructs (auto-`covered` where a defensible acceptance criterion can be written, else
+ * auto-`backstop`, never auto-`dismiss`; `unclassified` left for review) — moving the load-bearing
+ * never-dismiss invariant out of drift-prone prose and into a unit-testable function. The
+ * covered-vs-backstop JUDGMENT stays in the workflow (an LLM MAY upgrade an item to
+ * `explicit`/covered when it can write a real acceptance criterion), exactly as the UI adapter keeps
+ * that judgment in ui-phase. Keep the two in sync: if spec-phase's `--auto` policy changes, revisit
+ * this floor (mirrors the ui-consideration-probe autoResolve note).
+ */
+export function autoResolve(items: Edge[]): Resolution<EdgeVerification>[] {
+  return items.map((item): Resolution<EdgeVerification> => {
+    if (item.category === UNCLASSIFIED_CATEGORY) {
+      return { requirement_id: item.requirement_id, category: item.category, status: 'unresolved', verification: null, resolution: null, reason: null };
+    }
+    return { requirement_id: item.requirement_id, category: item.category, status: 'resolved', verification: 'backstop', resolution: item.probe, reason: null };
+  });
+}
+
 /*
  * CLI entry (EP-06 invokable surface): `edge-probe.cjs <requirements.json> [resolutions.json]`.
  * The generic I/O plumbing (parse, fail-closed exit 2, pretty-JSON out) lives in probe-core's
