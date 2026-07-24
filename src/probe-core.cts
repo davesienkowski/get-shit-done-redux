@@ -92,6 +92,44 @@ export interface Requirement {
   text?: string;
 }
 
+/* ------------------------------------------------------------------------- *
+ * Probe self-description (the descriptor contract; epic: probe self-description layer).
+ *
+ * Plain, JSON-serializable DATA (no RegExp/functions) so a descriptor round-trips a `probe describe`
+ * command and renders into the generated manifest (scripts/gen-probe-manifest.cjs). Each adapter
+ * exports ONE `ProbeDescriptor` referencing its EXISTING constants (TAXONOMY, VALIDATORS, …); the
+ * static `PROBE_REGISTRY` (src/probe-registry.cts) enumerates them. The descriptor is the cheap-to-grow
+ * seam — a factory over the adapters is deliberately NOT built (Gall: two shape-rooted adapters + one
+ * open-vocabulary one is enough to design the descriptor, not enough to force a shared factory).
+ * ------------------------------------------------------------------------- */
+
+/** One category of a probe's closed taxonomy, flattened to descriptor data. */
+export interface ProbeTaxonomyEntry {
+  id: string;
+  name: string;
+  /** the relevance-vocabulary ids (shape/element kinds) that make this category applicable */
+  applicableTo: string[];
+  /** the probe/consideration question this category raises (NOT a coverage claim — Goodhart) */
+  question: string;
+}
+
+/** A probe adapter's self-description. */
+export interface ProbeDescriptor {
+  /** stable axis id: 'edge' | 'prohibition' | 'ui' */
+  axis: string;
+  title: string;
+  /** how the probe is invoked (a probe bin filename, or a `gsd_run` subcommand) */
+  invoke: string;
+  /** deterministic propose (edge/ui) vs LLM adversarial recall (prohibition, ADR-550 D7b) */
+  proposeKind: 'deterministic' | 'llm-recall';
+  /** the relevance axis (shape/element vocabulary), or null for an open-vocabulary probe */
+  relevance: { name: string; vocabulary: string[] } | null;
+  /** the closed category taxonomy, or null for an open-vocabulary probe (prohibition) */
+  taxonomy: ProbeTaxonomyEntry[] | null;
+  /** the valid verification tiers for a resolved item */
+  verificationTiers: string[];
+}
+
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -362,6 +400,24 @@ export const PROHIBITION_VALIDATORS: Validators = {
 export function validateProhibitionResolution(resolution: Resolution<ProhibitionVerification>): true {
   return validateResolution(resolution, PROHIBITION_VALIDATORS);
 }
+
+/**
+ * The prohibition probe's self-description (epic: probe self-description layer). Open-vocabulary:
+ * `taxonomy` and `relevance` are null (recall is an LLM adversarial prose pass, ADR-550 D7b — there is
+ * no closed category set or cue vocabulary), `proposeKind` is `'llm-recall'`, and its checkable surface
+ * is the **verify-time** `check prohibition-enforcement` producer (bimodal, ADR-1606), not a spec-time
+ * probe bin. `verificationTiers` composes the existing `PROHIBITION_VALIDATORS.verification` (ADR-550 D7c:
+ * the descriptor references the runtime validators, it does not restate them as erasable types).
+ */
+export const PROHIBITION_DESCRIPTOR: ProbeDescriptor = {
+  axis: 'prohibition',
+  title: 'Prohibition (must-NOT) probe',
+  invoke: 'gsd_run check prohibition-enforcement',
+  proposeKind: 'llm-recall',
+  relevance: null,
+  taxonomy: null,
+  verificationTiers: PROHIBITION_VALIDATORS.verification,
+};
 
 /**
  * Deterministically project resolved prohibition items into the `must_haves.prohibitions:`

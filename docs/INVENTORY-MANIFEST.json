@@ -407,6 +407,7 @@
       "plan-scan.cjs",
       "planning-workspace.cjs",
       "probe-core.cjs",
+      "probe-registry.cjs",
       "profile-output.cjs",
       "profile-pipeline-command-router.cjs",
       "profile-pipeline.cjs",

@@ -26,6 +26,7 @@ import {
   type Resolution,
   type CoverageReport,
   type Validators,
+  type ProbeDescriptor,
   validateRequirement as coreValidateRequirement,
   validateResolution as coreValidateResolution,
   analyzeCoverage as coreAnalyzeCoverage,
@@ -131,6 +132,23 @@ export const UI_VALIDATORS: Validators = {
   categories: [...UI_TAXONOMY.map((c) => c.id), UNCLASSIFIED_CATEGORY],
   verification: ['explicit', 'backstop'],
   requiredFieldsByVerification: { explicit: ['resolution'], backstop: ['resolution'] },
+};
+
+/**
+ * The UI adapter's self-description (epic: probe self-description layer). Mirrors the edge descriptor on
+ * the UI element/state axis: the closed `UI_TAXONOMY` flattened (`applicableTo=elements`,
+ * `question=consideration`), `VALID_ELEMENT_KINDS` as the relevance vocabulary, and
+ * `UI_VALIDATORS.verification` composed as the tiers (ADR-550 D7c). Deterministic propose. `ProbeDescriptor`
+ * is the probe self-description — distinct from the ADR-1016 Runtime Capability Descriptor; never a capability.
+ */
+export const UI_DESCRIPTOR: ProbeDescriptor = {
+  axis: 'ui',
+  title: 'UI-consideration probe',
+  invoke: 'ui-consideration-probe.cjs',
+  proposeKind: 'deterministic',
+  relevance: { name: 'UI element kind', vocabulary: [...VALID_ELEMENT_KINDS] },
+  taxonomy: UI_TAXONOMY.map((c) => ({ id: c.id, name: c.name, applicableTo: c.elements, question: c.consideration })),
+  verificationTiers: UI_VALIDATORS.verification,
 };
 
 /**
