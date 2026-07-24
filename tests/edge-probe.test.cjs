@@ -536,3 +536,34 @@ describe('edge-probe: autoResolve (deterministic --auto never-dismiss floor, #11
     assert.deepEqual(ep.autoResolve(items), ep.autoResolve(items));
   });
 });
+
+// ══ CLI --auto — the invokable deterministic floor. `edge-probe.cjs <reqs.json> --auto` applies
+// autoResolve to the proposed edges (never dismiss; unclassified stays unresolved, #1110) so a caller
+// gets the deterministic --auto coverage in one invocation, without hand-authoring a resolutions file.
+// The seam a workflow's --auto step calls instead of re-deriving the floor in prose. ═════════════════
+describe('edge-probe: CLI --auto (invokable deterministic floor)', () => {
+  test('--auto backstops applicable edges and leaves unclassified unresolved; none dismissed', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'edge-probe-auto-'));
+    const reqPath = path.join(dir, 'requirements.json');
+    fs.writeFileSync(reqPath, JSON.stringify([
+      { id: 'R1', text: 'Round a number to N decimal places' }, // numeric-range → boundary + precision
+      { id: 'Z', text: 'xyzzy plugh frobnicate' },               // no cue → one unclassified edge (#1110)
+    ]));
+    const rep = JSON.parse(execFileSync('node', [BUILT_SCRIPT, reqPath, '--auto'], { encoding: 'utf8' }));
+    assert.equal(rep.coverage.applicable, 3);
+    assert.equal(rep.coverage.byVerification.backstop, 2); // R1's two edges auto-backstopped
+    assert.equal(rep.coverage.unresolved, 1);              // Z's unclassified edge stays unresolved
+    assert.ok(rep.items.every((i) => i.status !== 'dismissed'), 'never auto-dismiss');
+    const z = rep.items.find((i) => i.requirement_id === 'Z');
+    assert.equal(z.status, 'unresolved');
+    assert.equal(z.verification, null);
+  });
+  test('--auto is deterministic — two invocations produce byte-identical output', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'edge-probe-auto2-'));
+    const reqPath = path.join(dir, 'requirements.json');
+    fs.writeFileSync(reqPath, JSON.stringify([{ id: 'R1', text: 'Merge a list of overlapping intervals' }]));
+    const a = execFileSync('node', [BUILT_SCRIPT, reqPath, '--auto'], { encoding: 'utf8' });
+    const b = execFileSync('node', [BUILT_SCRIPT, reqPath, '--auto'], { encoding: 'utf8' });
+    assert.equal(a, b);
+  });
+});
