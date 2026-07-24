@@ -261,9 +261,22 @@ export function autoResolve(items: Edge[]): Resolution<EdgeVerification>[] {
  * `require.main === module` so it runs only when the compiled `.cjs` is executed directly.
  */
 if (require.main === module) {
+  // `--auto` (anywhere in argv) applies the deterministic floor: every proposed edge is auto-resolved
+  // via `autoResolve` (never dismiss; unclassified stays unresolved, #1110) instead of reading an
+  // author resolutions file. This is the invokable seam a workflow's `--auto` step calls rather than
+  // re-deriving the floor in prose. The flag is stripped from argv so runProbeCli's positional
+  // parsing (reqPath, resPath) is unaffected; in `--auto` mode any resolutions arg is ignored.
+  const auto = process.argv.includes('--auto');
+  const argv = auto ? process.argv.filter((a) => a !== '--auto') : process.argv;
   runProbeCli(
-    (requirements, resolutions) =>
-      analyzeCoverage(requirements as Requirement[], resolutions as Resolution<EdgeVerification>[]),
-    { usage: 'edge-probe.cjs <requirements.json> [resolutions.json]' },
+    (requirements, resolutions) => {
+      const reqs = requirements as Requirement[];
+      if (auto) {
+        const items = reqs.flatMap((r) => proposeEdges(r));
+        return analyzeCoverage(reqs, autoResolve(items));
+      }
+      return analyzeCoverage(reqs, resolutions as Resolution<EdgeVerification>[]);
+    },
+    { usage: 'edge-probe.cjs <requirements.json> [resolutions.json] [--auto]', argv },
   );
 }
