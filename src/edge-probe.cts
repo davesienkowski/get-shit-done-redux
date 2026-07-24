@@ -226,6 +226,43 @@ export function analyzeCoverage(
   return coreAnalyzeCoverage(items, resolutions, EDGE_VALIDATORS);
 }
 
+/**
+ * A per-requirement propose-then-confirm view — the edge-axis backport of the UI adapter's
+ * `proposeElements`/`ElementProposal` (#1867 WIRE-01). Carries the detected `shapes`, the `categories`
+ * they raise, the proposed `edges`, and an `unclassified` flag. A spec-phase probe step surfaces
+ * `shapes` to the author so a human can ADD a shape the heuristic missed — the classifier is a SIGNAL,
+ * not ground truth (Goodhart). A single tripped cue on a multi-shape requirement under-covers; the
+ * confirm step, not the heuristic, is what makes coverage sound.
+ */
+export interface EdgeProposal {
+  id: string;
+  shapes: Shape[];
+  categories: string[];
+  edges: Edge[];
+  unclassified: boolean;
+}
+
+/**
+ * Build the propose-then-confirm view for every requirement. Deterministic: a pure function of the
+ * input array (no Date/random/iteration-order surprise), so re-running on an unchanged SPEC yields
+ * byte-identical rows. An aggregating VIEW over the existing `classifyShape`/`applicableCategories`/
+ * `proposeEdges` functions — it adds no new classification logic. `unclassified` is true ONLY when
+ * prose classified to zero cues (#1110); an explicit `shapes: []` opt-out stays silent
+ * (`unclassified: false`, empty edges), matching `proposeEdges`.
+ */
+export function proposeEdgeProposals(requirements: Requirement[]): EdgeProposal[] {
+  return requirements.map((req): EdgeProposal => {
+    validateRequirement(req);
+    const edges = proposeEdges(req);
+    const shapes: Shape[] = Array.isArray(req.shapes)
+      ? req.shapes // already validated inside proposeEdges
+      : classifyShape(req.text);
+    const unclassified = !Array.isArray(req.shapes) && shapes.length === 0;
+    const categories = unclassified ? [] : applicableCategories(shapes);
+    return { id: req.id, shapes, categories, edges, unclassified };
+  });
+}
+
 /*
  * CLI entry (EP-06 invokable surface): `edge-probe.cjs <requirements.json> [resolutions.json]`.
  * The generic I/O plumbing (parse, fail-closed exit 2, pretty-JSON out) lives in probe-core's

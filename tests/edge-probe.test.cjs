@@ -490,3 +490,50 @@ describe('edge-probe: golden fixtures', () => {
     });
   }
 });
+
+// ══ proposeEdgeProposals — the propose-then-confirm view, backported from the UI adapter's
+// proposeElements (#1867 WIRE-01) to the edge axis. Surfaces the DETECTED shapes + applicable
+// categories per requirement so a workflow can show the author what was (and wasn't) classified —
+// the classifier is a SIGNAL, not ground truth (Goodhart); the confirm step is what makes coverage
+// sound. A pure aggregating view over classifyShape/applicableCategories/proposeEdges. Structured
+// assertions only. ═══════════════════════════════════════════════════════════════════════════════
+const CLASSIFIED_REQ = { id: 'C1', text: 'Merge a list of overlapping intervals' };
+const ZERO_CUE_REQ2 = { id: 'Z', text: 'xyzzy plugh frobnicate' };
+// Prose that trips only 'numeric-range' though the requirement is genuinely also a collection.
+const PARTIAL_CUE_REQ = { id: 'P', text: 'Cap the score at a maximum threshold' };
+
+describe('edge-probe: proposeEdgeProposals (propose-then-confirm view, parity with ui proposeElements)', () => {
+  test('a classified requirement returns one EdgeProposal with shapes, categories, edges, unclassified:false', () => {
+    const [p] = ep.proposeEdgeProposals([CLASSIFIED_REQ]);
+    assert.equal(p.id, 'C1');
+    assert.ok(p.shapes.includes('collection'));
+    assert.deepEqual([...p.categories].sort(), [...ep.applicableCategories(ep.classifyShape(CLASSIFIED_REQ.text))].sort());
+    assert.deepEqual(p.edges.map((e) => e.category).sort(), [...p.categories].sort());
+    assert.equal(p.unclassified, false);
+  });
+  test('a zero-cue requirement returns shapes:[], categories:[], unclassified:true, one unclassified edge (#1110)', () => {
+    const [p] = ep.proposeEdgeProposals([ZERO_CUE_REQ2]);
+    assert.deepEqual(p.shapes, []);
+    assert.deepEqual(p.categories, []);
+    assert.equal(p.unclassified, true);
+    assert.equal(p.edges.length, 1);
+    assert.equal(p.edges[0].category, ep.UNCLASSIFIED_CATEGORY);
+  });
+  test('an authored shapes[] override bypasses prose classification and drives the categories', () => {
+    const [p] = ep.proposeEdgeProposals([{ id: 'A', text: 'no cues here', shapes: ['collection'] }]);
+    assert.deepEqual([...p.shapes].sort(), ['collection']);
+    assert.deepEqual([...p.categories].sort(), ['adjacency', 'empty', 'ordering']);
+    assert.equal(p.unclassified, false);
+  });
+  test('deterministic — two calls on the same requirements deepEqual', () => {
+    assert.deepEqual(ep.proposeEdgeProposals([CLASSIFIED_REQ, ZERO_CUE_REQ2]), ep.proposeEdgeProposals([CLASSIFIED_REQ, ZERO_CUE_REQ2]));
+  });
+  test('partial-cue recall gap: heuristic categories are a strict subset of the confirmed shape union (confirm is load-bearing)', () => {
+    const [heuristic] = ep.proposeEdgeProposals([PARTIAL_CUE_REQ]);
+    const [confirmed] = ep.proposeEdgeProposals([{ ...PARTIAL_CUE_REQ, shapes: ['numeric-range', 'collection'] }]);
+    const hSet = new Set(heuristic.categories);
+    const cSet = new Set(confirmed.categories);
+    for (const cat of hSet) assert.ok(cSet.has(cat), `heuristic category ${cat} must be in the confirmed union`);
+    assert.ok(cSet.size > hSet.size, 'the confirmed union must strictly exceed the heuristic set');
+  });
+});
