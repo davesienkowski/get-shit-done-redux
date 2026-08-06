@@ -140,6 +140,28 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
 
 ---
 
+## When your config file cannot be read
+
+GSD distinguishes a config file that is **absent** from one that is **present but unusable**. The
+two used to be indistinguishable: a single trailing comma in `.planning/config.json` silently
+replaced your entire configuration with built-in defaults, and nothing said so (#1880).
+
+| Situation | What GSD does | Diagnostic |
+|---|---|---|
+| No `.planning/config.json` | Uses built-in defaults. This is normal. | none |
+| File present, valid, has settings | Uses your settings. | none |
+| File present, valid, but empty (`{}`) | Uses built-in defaults. | none |
+| **File present but not valid JSON** | Uses built-in defaults — **your settings are not applied** | `warning: <path> is not valid JSON — its settings were NOT applied` |
+| **File present but unreadable** (e.g. permissions) | Uses built-in defaults — **your settings are not applied** | `warning: <path> could not be read (EACCES) — its settings were NOT applied` |
+
+The warning is printed once per file per run, so a repeated command will not spam it.
+
+The same applies to the global `~/.gsd/defaults.json`. If the project config is also unusable, the
+project one is reported, since that is the file you are most likely able to fix.
+
+**If you see this warning:** your config was not applied. Validate the file, for example with
+`node -e "JSON.parse(require('fs').readFileSync('.planning/config.json','utf8'))"`, then re-run.
+
 ## Core Settings
 
 | Setting | Type | Options | Default | Description |
@@ -164,7 +186,7 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
 | `dynamic_routing.provider_escalation` | string[] | ordered model IDs | (none) | Opt-in fallback providers tried when a run dies on a quota / rate limit — see [provider escalation](#provider-escalation-on-quota-exceeded--added-in-v143). Added in v1.43 ([#2296](https://github.com/open-gsd/gsd-core/issues/2296)) |
 | `project_code` | string | any short string | (none) | Prefix for phase directory names (e.g., `"ABC"` produces `ABC-01-setup/`). Added in v1.31 |
 | `phase_id_convention` | enum | `"milestone-prefixed"`, `null` | `null` | Phase ID naming convention. `null` = legacy numeric IDs (`Phase 1`, `Phase 2`). `"milestone-prefixed"` = globally unique IDs that encode the enclosing milestone (`Phase 1-01`, `Phase 1-02`). Run `gsd-tools roadmap upgrade --convention milestone-prefixed` to migrate an existing ROADMAP.md. |
-| `response_language` | string | language code | (none) | Language for agent responses (e.g., `"pt"`, `"ko"`, `"ja"`). Propagates to all spawned agents for cross-phase language consistency. Added in v1.32 |
+| `response_language` | string | language code | (none) | Language for agent responses (e.g., `"pt"`, `"ko"`, `"ja"`). Propagates to all spawned agents for cross-phase language consistency. Added in v1.32. UAT checkpoint frames (`/gsd-verify-work`) render a localized banner/instruction for English, Spanish, French, German, Portuguese, Japanese, Chinese, Korean, Italian, Dutch, Polish, Russian, Ukrainian, Turkish, Hindi, Arabic, Vietnamese, and Indonesian (endonyms and ISO codes also accepted); any other value falls back to the English frame. |
 | `context_window` | number | any integer | `200000` | Context window size in tokens. Set `1000000` for 1M-context models (e.g., `claude-fable-5`). Values `>= 500000` enable adaptive context enrichment (full-body reads of prior SUMMARY.md, deeper anti-pattern reads). Configured via `/gsd-config --advanced`. |
 | `context_profile` | string | `dev`, `research`, `review` | (none) | Execution context preset that applies a pre-configured bundle of mode, model, and workflow settings for the current type of work. Added in v1.34 |
 | `claude_md_path` | string | any file path | `./.claude/CLAUDE.md` | Custom output path for the generated CLAUDE.md file. Useful for monorepos or projects that need CLAUDE.md in a non-root location. Defaults to `./.claude/CLAUDE.md` — a valid project-scoped memory location that keeps GSD-generated content from polluting a hand-crafted repo-root `CLAUDE.md` ([#1098](https://github.com/open-gsd/gsd-core/issues/1098)). An existing file without GSD markers is never overwritten unless `--force` is passed. Default changed from `./CLAUDE.md` in v1.5. Added in v1.36 |
@@ -206,7 +228,9 @@ API key fields accept a string value (the key itself). They can also be set to t
 
 ### Code-review CLI routing
 
-`review.models.<cli>` maps a reviewer flavor to a bare model id. The code-review workflow injects this value into the CLI's `--model` (or `-m`) flag when invoking the reviewer.
+`review.models.<cli>` maps a reviewer flavor to a bare model id, which is injected into the CLI's own model flag (`--model`, `-m`, …) when the reviewer is invoked.
+
+The key suffix is **not** always the lane slug. Each lane declares the config key it reads, and one shipped lane already differs: the Antigravity lane's slug is `antigravity` but its key is `review.models.agy`, after the CLI's own name. Consult the table below rather than deriving the key from the flag.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -214,8 +238,22 @@ API key fields accept a string value (the key itself). They can also be set to t
 | `review.models.codex` | string | `null` | Model id for Codex review (injected into --model), e.g. `"gpt-5"` |
 | `review.models.gemini` | string | `null` | Model id for Gemini review (injected into -m), e.g. `"gemini-2.5-pro"` |
 | `review.models.opencode` | string | `null` | Model id for OpenCode review (injected into --model), e.g. `"claude-sonnet-4"` |
+| `review.models.kimi-code` | string | `null` | Model id for Kimi Code review (injected into -m) |
 
-The `<cli>` slug is validated against `[a-zA-Z0-9_-]+`. Empty or path-containing slugs are rejected by `config-set`.
+**Ownership.** These keys are owned by their reviewer-lane capabilities rather than the central
+config schema — `review.models.ollama` belongs to the `ollama` capability, `review.ollama_host`
+to the same, and so on. Key names and existing `.planning/config.json` files are unchanged; only
+which schema validates them moved.
+
+One consequence follows: `<cli>` must now name a **declared reviewer lane**. Previously any slug
+matching `[a-zA-Z0-9_-]+` was accepted, so a typo or a key left over from a removed reviewer
+validated silently and was never read. Such a key is now rejected by `config-set`. The declared
+lanes are `gemini`, `claude`, `codex`, `opencode`, `agy` (the Antigravity lane — its key suffix is
+the CLI's own name, not the lane slug), `ollama`, `lm_studio` and `llama_cpp`.
+
+The same applies to `review.max_prompt_tokens_per_reviewer.<slug>`. `review.max_prompt_tokens`
+(the global default), `review.default_reviewers` and `review.reviewer_instances` describe policy
+across lanes rather than one lane's behavior, so they remain central and are unaffected.
 
 ### Reviewer defaults for `/gsd-review`
 
@@ -223,7 +261,7 @@ Use `review.default_reviewers` to scope the no-flag `/gsd-review` run to a subse
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `review.default_reviewers` | string[] \| null | `null` (all detected reviewers) | Optional default subset for no-flag `/gsd-review`, e.g. `["gemini","codex"]`. Entries may be built-in reviewer slugs or configured `review.reviewer_instances` names. Precedence is: explicit reviewer flags > `--all` > `review.default_reviewers` > all detected. Unknown slugs are ignored with a warning when no instances are configured; with `review.reviewer_instances` present, unknown entries are hard errors to catch typoed instance names. Known-but-undetected slugs are ignored with an info note; empty arrays are rejected by `config-set`. |
+| `review.default_reviewers` | string[] \| null | `null` (all detected reviewers) | Optional default subset for no-flag `/gsd-review`, e.g. `["gemini","codex"]`. Entries may be built-in reviewer slugs or configured `review.reviewer_instances` names. Precedence is: explicit reviewer flags > `--all` > `review.default_reviewers` > all detected. Unknown slugs are ignored with a warning when no instances are configured; with `review.reviewer_instances` present, unknown entries are hard errors to catch typoed instance names. Known-but-undetected slugs are ignored with an info note; empty arrays are rejected by `config-set`. This leniency is specific to the configured default: a reviewer named by an explicit CLI flag that cannot run is an error, not an info note. |
 
 Example:
 
@@ -301,6 +339,7 @@ All workflow toggles follow the **absent = enabled** pattern. If a key is missin
 | `workflow.ui_review` | boolean | `true` | Run visual quality audit (`/gsd-ui-review`) after phase execution in autonomous mode. When `false`, the UI audit step is skipped. |
 | `workflow.node_repair` | boolean | `true` | Autonomous task repair on verification failure |
 | `workflow.node_repair_budget` | number | `2` | Max repair attempts per failed task |
+| `workflow.smart_zone_tokens` | number | `100000` | Smart-zone token budget for phase-effort estimation (#2630, [ADR-2629](adr/2629-phase-effort-estimation-calibration.md)). A phase whose estimate exceeds this is flagged with a split recommendation — **advisory only, never a block**. This is a *policy default, not a benchmark constant*: LLM output quality degrades before the advertised context window is full, but the effective ceiling is model-, task-, and distractor-dependent, so no universal number exists. Lower it for models that degrade early; the estimate-vs-actual calibration loop corrects the figure per project over time. Must be a positive integer. |
 | `workflow.research_before_questions` | boolean | `false` | Run research before discussion questions instead of after |
 | `workflow.discuss_mode` | string | `'discuss'` | Controls how `/gsd-discuss-phase` gathers context. `'discuss'` (default) asks questions one-by-one. `'assumptions'` reads the codebase first, generates structured assumptions with confidence levels, and only asks you to correct what's wrong. Added in v1.28 |
 | `workflow.max_discuss_passes` | number | `3` | Maximum number of question rounds in discuss-phase before the workflow stops asking. Useful in headless/auto mode to prevent infinite discussion loops. |
@@ -332,6 +371,8 @@ All workflow toggles follow the **absent = enabled** pattern. If a key is missin
 | `workflow.subagent_timeout` | number | `300000` | Timeout in milliseconds for parallel subagent tasks (e.g. codebase mapping). Increase for large codebases or slower models. Default: 300000 (5 minutes) |
 | `executor.stall_detect_interval_minutes` | number | `5` | Minutes between executor stall checks while an executor agent is active. The execute-phase orchestrator uses this cadence to inspect recent commits and avoid waiting forever on a silent agent. |
 | `executor.stall_threshold_minutes` | number | `10` | Minutes without executor completion or expected-branch commit activity before execute-phase offers recovery choices for a possible stalled executor. |
+| `planner.stall_detect_interval_minutes` | number | `5` | Minutes between planner/plan-checker stall checks while a planner or plan-checker agent is active. The plan-phase orchestrator uses this cadence to inspect on-disk `*-PLAN.md` activity and avoid waiting forever on a silent agent (#2650). |
+| `planner.stall_threshold_minutes` | number | `10` | Minutes without a completion marker or fresh on-disk plan activity before plan-phase automatically surfaces the accept-plans/retry/stop recovery choice for a possible stalled planner or plan-checker (#2650). |
 | `workflow.inline_plan_threshold` | number | `3` | Maximum number of tasks in a phase before the planner generates a separate PLAN.md file instead of inlining tasks in the prompt |
 | `workflow.drift_threshold` | number | `3` | Minimum number of new structural elements (new directories, barrel exports, migrations, route modules) before the codebase-drift gate takes action. The gate runs at two points: `plan:pre` (before `/gsd-plan-phase` plans — **non-blocking, warn-only**, so plans are authored against a fresh STRUCTURE.md) and `execute:wave:post` (after `/gsd-execute-phase` — honors `workflow.drift_action`). See [#2003](https://github.com/open-gsd/gsd-core/issues/2003). Added in v1.39 |
 | `workflow.drift_action` | string | `warn` | What to do when `workflow.drift_threshold` is exceeded **at `execute:wave:post`** (after `/gsd-execute-phase`). `warn` prints a message suggesting `/gsd-map-codebase --paths …`; `auto-remap` spawns `gsd-codebase-mapper` scoped to the affected paths. The `plan:pre` pre-check is always warn-only regardless of this setting — it never auto-spawns the mapper at plan entry. Added in v1.39 |
@@ -782,7 +823,7 @@ If a skipped or load-failed overlay capability (for example, one whose `engines.
 
 Config keys declared in an overlay capability's `.config` slice federate into the `loadConfig` return value via the same Federated Config channel as first-party capability keys. They appear as valid keys in `config-schema.cjs` (`isValidConfigKey`) and in the runtime config schema, so overlay capabilities can declare project-local config toggles without editing the central config schema.
 
-> **See also:** [`docs/reference/capability-manifest.md`](reference/capability-manifest.md) for the full `capability.json` schema, [`docs/how-to/import-a-capability-from-a-url.md`](how-to/import-a-capability-from-a-url.md) for installation steps, and [ADR-1244](adr/1244-runtime-capability-registry-overlay.md) for the design record.
+> **See also:** [`docs/reference/capability-manifest.md`](reference/capability-manifest.md) for the full `capability.json` schema, [`docs/how-to/import-a-capability-from-a-url.md`](how-to/import-a-capability-from-a-url.md) for installation steps, and [ADR-1244](adr/1244-capability-ecosystem.md) for the design record.
 
 ---
 
@@ -978,14 +1019,14 @@ Configure per-CLI model selection for `/gsd-review`. When set, overrides the CLI
 | `review.models.claude` | string | (CLI default) | Model used when `--claude` reviewer is invoked |
 | `review.models.codex` | string | (CLI default) | Model used when `--codex` reviewer is invoked |
 | `review.models.opencode` | string | (CLI default) | Model used when `--opencode` reviewer is invoked |
-| `review.models.qwen` | string | (CLI default) | Model used when `--qwen` reviewer is invoked |
-| `review.models.cursor` | string | (CLI default) | Model used when `--cursor` reviewer is invoked |
+| `review.models.agy` | string | (CLI default) | Model used when the `--antigravity` / `--agy` reviewer is invoked. The key suffix is the CLI's own name (`agy`), not the lane slug — the lane declares which key it reads, so the two need not match |
+| `review.models.kimi-code` | string | (CLI default) | Model used when the `--kimi-code` reviewer is invoked (injected into `-m`) |
 | `review.models.ollama` | string | (server default) | Model name passed to Ollama when `--ollama` reviewer is invoked. If unset, the first available model reported by the server is used (e.g. `llama3`). Set to a specific tag: `gsd config-set review.models.ollama codellama` |
 | `review.models.lm_studio` | string | (server default) | Model name passed to LM Studio when `--lm-studio` reviewer is invoked. If unset, the first available model reported by the server is used. |
 | `review.models.llama_cpp` | string | (server default) | Model name passed to llama.cpp when `--llama-cpp` reviewer is invoked. If unset, the first model reported by `/v1/models` is used. |
 | `review.default_reviewers` | string[] \| null | (all detected reviewers) | Default reviewer subset for no-flag `/gsd-review`. Example: `["gemini","codex"]`. May include configured `review.reviewer_instances` names. Explicit flags and `--all` override this setting. |
 | `review.max_prompt_tokens` | number\|null | null | Default maximum estimated tokens for the assembled review prompt. When set, the prompt is deterministically trimmed before being sent to each reviewer. Per-reviewer overrides via `review.max_prompt_tokens_per_reviewer` take precedence. null = no trim (current behavior). |
-| `review.max_prompt_tokens_per_reviewer` | object | {} | Per-reviewer token budget overrides. Keys are reviewer slugs (ollama, llama_cpp, lm_studio, gemini, claude, codex, opencode, qwen, cursor). Values override `review.max_prompt_tokens` for that reviewer. Recommended for local model servers. |
+| `review.max_prompt_tokens_per_reviewer` | object | {} | Per-reviewer token budget overrides. Keys are reviewer slugs. Only lanes that declare a budget key accept one — today `ollama`, `lm_studio` and `llama_cpp`, the local model servers this exists for. Values override `review.max_prompt_tokens` for that reviewer. A per-lane value of `0` disables trimming for that lane specifically. |
 | `review.ollama_host` | string | `http://localhost:11434` | Base URL of the Ollama server. Override when running Ollama on a non-default port or remote host: `gsd config-set review.ollama_host http://192.168.1.10:11434` |
 | `review.lm_studio_host` | string | `http://localhost:1234` | Base URL of the LM Studio local server. Override when using a non-default port. |
 | `review.llama_cpp_host` | string | `http://localhost:8080` | Base URL of the llama.cpp server (`llama-server`). Override when using a non-default port. |

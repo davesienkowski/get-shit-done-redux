@@ -185,7 +185,7 @@ GSD 워크스페이스 관리 — 리포지토리 복사본과 독립적인 `.pl
 - `--view` 사용: 기존 RESEARCH.md를 stdout으로 출력, 생성 없음. RESEARCH.md가 없으면 오류 발생.
 
 **패키지 적법성 게이트 (v1.42.1):**
-리서처가 외부 패키지를 추천하면 각 패키지에 대해 `slopcheck install <pkg> --json`을 실행하고 레지스트리, 출시일, 다운로드 수, 소스 리포지토리, slopcheck 판정이 담긴 `## Package Legitimacy Audit` 테이블을 RESEARCH.md에 작성합니다. 판정:
+리서처가 외부 패키지를 추천하면 각 패키지에 대해 `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>`을 실행하고 레지스트리, 출시일, 다운로드 수, 소스 리포지토리, 적법성 판정이 담긴 `## Package Legitimacy Audit` 테이블을 RESEARCH.md에 작성합니다. 판정:
 
 - `[SLOP]` — 패키지가 RESEARCH.md에서 완전히 제거; 계획자에게 전달되지 않음
 - `[SUS]` — 패키지 플래그 지정; 계획자가 설치 작업 전에 `checkpoint:human-verify` 삽입
@@ -218,7 +218,7 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 | 인수 / 플래그 | 필수 | 설명 |
 |-----------------|----------|-------------|
 | `N` | **예** | 계획 및 리뷰할 단계 번호 |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | 아니요 | 단일 리뷰어 선택 |
+| 리뷰어 플래그 | 아니요 | 모든 리뷰어 레인 플래그를 그대로 전달: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | 아니요 | 구성된 모든 리뷰어를 병렬로 실행 |
 | `--max-cycles N` | 아니요 | 사이클 상한 재정의 (기본값 3) |
 
@@ -1250,6 +1250,7 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 | `--qwen` | Qwen Code 검토 포함 (Alibaba Qwen 모델) |
 | `--cursor` | Cursor 에이전트 검토 포함 |
 | `--agy` / `--antigravity` | Antigravity CLI 검토 포함 (Google 자격증명으로 무료) |
+| `--kimi-code` | Kimi Code CLI 검토 포함 (Moonshot AI) |
 | `--ollama` | Ollama 서버 검토 포함 |
 | `--lm-studio` | LM Studio 서버 검토 포함 |
 | `--llama-cpp` | llama.cpp 서버 검토 포함 |

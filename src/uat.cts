@@ -98,7 +98,8 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
 
     // Process UAT files
     for (const file of files.filter(f => f.includes('-UAT') && f.endsWith('.md'))) {
-      const content = fs.readFileSync(path.join(phaseDir, file), 'utf-8');
+      const uatFilePath = path.join(phaseDir, file);
+      const content = fs.readFileSync(uatFilePath, 'utf-8');
       const items = parseUatItems(content);
       if (items.length > 0) {
         results.push({
@@ -107,7 +108,7 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
           file,
           file_path: toPosixPath(path.relative(cwd, path.join(phaseDir, file))),
           type: 'uat',
-          status: (extractFrontmatter(content).status as string || 'unknown'),
+          status: (extractFrontmatter(content, uatFilePath).status as string || 'unknown'),
           items,
         });
       }
@@ -115,10 +116,11 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
 
     // Process VERIFICATION files
     for (const file of files.filter(f => f.includes('-VERIFICATION') && f.endsWith('.md'))) {
-      const content = fs.readFileSync(path.join(phaseDir, file), 'utf-8');
-      const status = extractFrontmatter(content).status as string || 'unknown';
+      const verificationFilePath = path.join(phaseDir, file);
+      const content = fs.readFileSync(verificationFilePath, 'utf-8');
+      const status = extractFrontmatter(content, verificationFilePath).status as string || 'unknown';
       if (status === 'human_needed' || status === 'gaps_found') {
-        const items = parseVerificationItems(content, status);
+        const items = parseVerificationItems(content, status, verificationFilePath);
         if (items.length > 0) {
           results.push({
             phase: phaseNum,
@@ -357,6 +359,7 @@ function parseExpectedFromTestBlock(block: string): string | null {
 interface CheckpointFrame {
   banner: string;
   instruction: string;
+  direction?: 'rtl';
 }
 
 const CHECKPOINT_BOX_WIDTH = 64; // total column width of the ╔══...╗ border, borders stay byte-identical
@@ -398,6 +401,43 @@ const CHECKPOINT_FRAMES: Record<string, CheckpointFrame> = {
     banner: 'PUNTO DI CONTROLLO: Verifica richiesta',
     instruction: 'Digita `pass` o descrivi cosa non va.',
   },
+  dutch: {
+    banner: 'CONTROLEPUNT: Verificatie vereist',
+    instruction: 'Typ `pass` of beschrijf wat er mis is.',
+  },
+  polish: {
+    banner: 'PUNKT KONTROLNY: Wymagana weryfikacja',
+    instruction: 'Wpisz `pass` lub opisz, co jest nie tak.',
+  },
+  russian: {
+    banner: 'КОНТРОЛЬНАЯ ТОЧКА: требуется проверка',
+    instruction: 'Введите `pass` или опишите, что не так.',
+  },
+  ukrainian: {
+    banner: 'КОНТРОЛЬНА ТОЧКА: потрібна перевірка',
+    instruction: 'Введіть `pass` або опишіть, що не так.',
+  },
+  turkish: {
+    banner: 'KONTROL NOKTASI: Doğrulama gerekli',
+    instruction: '`pass` yazın veya sorunu açıklayın.',
+  },
+  hindi: {
+    banner: 'चेकपॉइंट: सत्यापन आवश्यक',
+    instruction: '`pass` लिखें या बताएं कि क्या गलत है।',
+  },
+  arabic: {
+    banner: 'نقطة تحقق: المراجعة مطلوبة',
+    instruction: 'اكتب `pass` أو صف المشكلة.',
+    direction: 'rtl',
+  },
+  vietnamese: {
+    banner: 'ĐIỂM KIỂM TRA: Cần xác minh',
+    instruction: 'Nhập `pass` hoặc mô tả vấn đề.',
+  },
+  indonesian: {
+    banner: 'TITIK PEMERIKSAAN: Verifikasi diperlukan',
+    instruction: 'Ketik `pass` atau jelaskan apa yang salah.',
+  },
 };
 
 // Free-form response_language aliases → canonical CHECKPOINT_FRAMES key.
@@ -411,22 +451,30 @@ const CHECKPOINT_LANGUAGE_ALIASES: Record<string, string> = {
   chinese: 'chinese', zh: 'chinese', 'zh-cn': 'chinese', 'zh-tw': 'chinese', mandarin: 'chinese', 'simplified chinese': 'chinese', 'traditional chinese': 'chinese', '中文': 'chinese',
   korean: 'korean', ko: 'korean', '한국어': 'korean',
   italian: 'italian', it: 'italian', italiano: 'italian',
+  dutch: 'dutch', nl: 'dutch', nederlands: 'dutch', flemish: 'dutch', vlaams: 'dutch',
+  polish: 'polish', pl: 'polish', polski: 'polish',
+  russian: 'russian', ru: 'russian', 'ru-ru': 'russian', 'русский': 'russian',
+  ukrainian: 'ukrainian', uk: 'ukrainian', ua: 'ukrainian', 'українська': 'ukrainian',
+  turkish: 'turkish', tr: 'turkish', 'türkçe': 'turkish', turkce: 'turkish',
+  hindi: 'hindi', hi: 'hindi', 'हिन्दी': 'hindi', 'हिंदी': 'hindi',
+  arabic: 'arabic', ar: 'arabic', 'العربية': 'arabic',
+  vietnamese: 'vietnamese', vi: 'vietnamese', 'tiếng việt': 'vietnamese', 'tieng viet': 'vietnamese',
+  indonesian: 'indonesian', id: 'indonesian', 'bahasa indonesia': 'indonesian',
 };
 
 function resolveCheckpointFrame(responseLanguage: string | undefined): CheckpointFrame {
   if (!responseLanguage) return CHECKPOINT_FRAMES.english;
-  const key = CHECKPOINT_LANGUAGE_ALIASES[responseLanguage.trim().toLowerCase()];
+  const key = CHECKPOINT_LANGUAGE_ALIASES[
+    responseLanguage.trim().normalize('NFC').toLowerCase()
+  ];
   return (key && CHECKPOINT_FRAMES[key]) || CHECKPOINT_FRAMES.english;
 }
 
-// Approximate East Asian Width ranges (Unicode property values W and F) — the
-// CJK scripts CHECKPOINT_FRAMES ships (Japanese/Chinese/Korean) render each
-// matching code point at 2 terminal/display columns, not 1. Padding computed
-// from `.length` (UTF-16 code units) undercounts these by one column per
-// wide character, visually misaligning the box's right border (#2402 review
-// medium finding). Latin-script frames (English/Spanish/French/German/
-// Portuguese/Italian) contain no wide code points, so displayWidth === length
-// for them — no behavior change there.
+// Approximate terminal-cell width. East Asian Width W/F code points occupy two
+// cells, while Unicode combining marks occupy no additional cell beyond their
+// base character. Counting only W/F ranges is insufficient for scripts such as
+// Devanagari: Hindi vowel signs and viramas are combining marks, and treating
+// each as a full cell visibly shifts the checkpoint box's right border.
 function isWideCodePoint(codePoint: number): boolean {
   return (
     (codePoint >= 0x1100 && codePoint <= 0x115f) || // Hangul Jamo
@@ -445,11 +493,17 @@ function isWideCodePoint(codePoint: number): boolean {
   );
 }
 
+// Non-spacing/enclosing marks and format controls occupy zero terminal cells.
+// Spacing combining marks (General_Category=Mc), such as Devanagari vowel
+// signs, still advance the cursor and must contribute one column.
+const ZERO_WIDTH_MARK_RE = /\p{gc=Mn}|\p{gc=Me}|\p{gc=Cf}/u;
+
 // Iterates by Unicode code point (not UTF-16 code unit) so astral characters
 // are measured once, not as two surrogate units.
 function displayWidth(text: string): number {
   let width = 0;
   for (const ch of text) {
+    if (ZERO_WIDTH_MARK_RE.test(ch)) continue;
     width += isWideCodePoint(ch.codePointAt(0) as number) ? 2 : 1;
   }
   return width;
@@ -466,11 +520,22 @@ function checkpointBoxLine(text: string): string {
   return `║${padded}║`;
 }
 
+const RTL_ISOLATE = '\u2067';
+const POP_DIRECTIONAL_ISOLATE = '\u2069';
+
+function isolateCheckpointFrameText(text: string, frame: CheckpointFrame): string {
+  return frame.direction === 'rtl'
+    ? `${RTL_ISOLATE}${text}${POP_DIRECTIONAL_ISOLATE}`
+    : text;
+}
+
 function buildCheckpoint(currentTest: { number: number; name: string; expected: string }, responseLanguage?: string): string {
   const frame = resolveCheckpointFrame(responseLanguage);
+  const banner = isolateCheckpointFrameText(frame.banner, frame);
+  const instruction = isolateCheckpointFrameText(frame.instruction, frame);
   return [
     '╔══════════════════════════════════════════════════════════════╗',
-    checkpointBoxLine(frame.banner),
+    checkpointBoxLine(banner),
     '╚══════════════════════════════════════════════════════════════╝',
     '',
     `**Test ${currentTest.number}: ${currentTest.name}**`,
@@ -478,7 +543,7 @@ function buildCheckpoint(currentTest: { number: number; name: string; expected: 
     currentTest.expected,
     '',
     '──────────────────────────────────────────────────────────────',
-    frame.instruction,
+    instruction,
     '──────────────────────────────────────────────────────────────',
   ].join('\n');
 }
@@ -743,7 +808,7 @@ function rawGapEntryText(entryLines: string[]): string {
 
 // ─── parseVerificationItems ───────────────────────────────────────────────────
 
-function parseVerificationItems(content: string, status: string): UatItem[] {
+function parseVerificationItems(content: string, status: string, sourcePath?: string): UatItem[] {
   const items: UatItem[] = [];
   if (status === 'human_needed') {
     // #2286: the frontmatter's structured `human_verification:` YAML array
@@ -752,7 +817,7 @@ function parseVerificationItems(content: string, status: string): UatItem[] {
     // whose frontmatter declares the array doesn't require any particular
     // `## Human Verification` body shape at all. An absent or empty array
     // (length 0) falls back to the body scan unchanged.
-    const frontmatter = extractFrontmatter(content);
+    const frontmatter = extractFrontmatter(content, sourcePath);
     const humanVerification = frontmatter.human_verification;
     if (Array.isArray(humanVerification) && humanVerification.length > 0) {
       humanVerification.forEach((entry, idx) => {
@@ -951,5 +1016,9 @@ export = {
   cmdRenderCheckpoint,
   parseCurrentTest,
   buildCheckpoint,
+  CHECKPOINT_FRAMES,
+  CHECKPOINT_LANGUAGE_ALIASES,
+  resolveCheckpointFrame,
+  checkpointBoxLine,
   parseDeferredItems,
 };

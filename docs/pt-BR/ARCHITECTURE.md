@@ -428,7 +428,7 @@ ui-phase → UI-SPEC.md (contrato de design, opcional)
 plan-phase
     ├── Portão de pesquisa (bloqueia se RESEARCH.md tiver perguntas abertas não resolvidas)
     ├── Pesquisador de Fase → RESEARCH.md
-    │       └── Portão de Legitimidade de Pacotes: slopcheck em cada pacote; [SLOP] removido,
+    │       └── Portão de Legitimidade de Pacotes: veredicto da API de registro em cada pacote; [SLOP] removido,
     │           [SUS]/[ASSUMED] sinalizados; tabela de Auditoria escrita no RESEARCH.md
     ├── Planner (com verificação de alcançabilidade) → arquivos PLAN.md
     │       └── checkpoint:human-verify injetado antes de instalações [ASSUMED]/[SUS];
@@ -553,7 +553,7 @@ Caminhos equivalentes para outros runtimes:
 │       └── SUMMARY.md
 ├── todos/
 │   ├── pending/            # Ideias capturadas
-│   └── done/               # Todos concluídos
+│   └── completed/          # Todos concluídos
 ├── threads/               # Threads de contexto persistentes (do /gsd-thread)
 ├── seeds/                 # Ideias prospectivas (do /gsd-capture --seed)
 ├── debug/                  # Sessões de depuração ativas
@@ -687,7 +687,7 @@ O pipeline pesquisador → planner → executor inclui um portão de cadeia de s
 
 | Camada | Componente | Ação |
 |--------|------------|------|
-| Pesquisa | `gsd-phase-researcher` | Executa `slopcheck install <pkgs> --json`; escreve tabela `## Package Legitimacy Audit` no RESEARCH.md; remove pacotes `[SLOP]` antes de o RESEARCH.md ser escrito |
+| Pesquisa | `gsd-phase-researcher` | Executa `gsd-tools query package-legitimacy check --ecosystem <npm\|pypi\|crates> <pkgs>`; escreve tabela `## Package Legitimacy Audit` no RESEARCH.md; remove pacotes `[SLOP]` antes de o RESEARCH.md ser escrito |
 | Planejamento | `gsd-planner` | Lê a tabela de Auditoria; insere `checkpoint:human-verify` antes de qualquer tarefa de instalação `[ASSUMED]` ou `[SUS]`; adiciona linha STRIDE `T-{phase}-SC` supply-chain ao `<threat_model>` |
 | Execução | `gsd-executor` | REGRA 3 exclui a instalação de pacotes do escopo de correção automática; instalações com falha surgem como checkpoints, nunca substituições silenciosas |
 

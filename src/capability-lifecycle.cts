@@ -64,7 +64,7 @@ const trustMod = require('./capability-trust.cjs') as {
   signatureForManifest: (manifest: Record<string, unknown>, stagedDir?: string) => string;
 };
 const consentMod = require('./capability-consent.cjs') as {
-  recordProjectConsent: (args: { gsdHome?: string; projectRoot: string; id: string; integrity: string; disclosureSignature: string; contentHash: string }) => void;
+  recordProjectConsent: (args: { gsdHome?: string; projectRoot: string; id: string; integrity: string; disclosureSignature: string; contentHash: string; reviewerHost?: string }) => void;
   revokeProjectConsent: (args: { gsdHome?: string; projectRoot: string; id: string }) => void;
   /** #1459 CB-1/CB-2: recompute the full-bundle content hash (the consent security binding). */
   bundleContentHash: (capDir: string) => string;
@@ -298,9 +298,23 @@ function releaseLock(handle: LockHandle | null): void {
   lockMod.releaseLock(handle);
 }
 
+/**
+ * #50: max bytes for a capability.json / shared-settings JSON read through the bounded reader. Matches
+ * the loader's MANIFEST_MAX_BYTES (capability-loader.cts) — the same fd-based hardening applied here.
+ */
+const MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+
 function readManifest(dir: string): Record<string, unknown> | null {
   try {
-    const raw = fs.readFileSync(path.join(dir, 'capability.json'), 'utf8');
+    // #50: read via the SHARED fd-based bounded reader (open O_NONBLOCK → fstat → require regular file →
+    // size cap → read exactly size) instead of raw fs.readFileSync. A project-planted FIFO/device/
+    // symlink-to-device capability.json can no longer BLOCK (the raw readFileSync hang) and an oversized
+    // manifest can no longer read UNBOUNDED (OOM) under the held mutation lock — the exact #1459
+    // finding 2 hardening the loader and ledger already carry. readSmallRegularFile returns null for a
+    // genuinely-missing file and THROWS (fail-closed) for a non-regular/oversized one; either way the
+    // manifest is treated as absent.
+    const raw = ledgerMod.readSmallRegularFile(path.join(dir, 'capability.json'), MANIFEST_MAX_BYTES);
+    if (raw === null) return null;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     return parsed as Record<string, unknown>;
@@ -311,7 +325,12 @@ function readManifest(dir: string): Record<string, unknown> | null {
 
 function readJsonFile(file: string): Record<string, unknown> | null {
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // #50: bounded fd-based read (see readManifest). A repo-plantable poison.json (symlink→/dev/zero,
+    // reachable via the reconcile → stripCapabilitySharedEdits → confinedSharedFile path, whose final
+    // component is NOT realpathed) can no longer hang/OOM the reconcile under the mutation lock.
+    const raw = ledgerMod.readSmallRegularFile(file, MANIFEST_MAX_BYTES);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     return parsed as Record<string, unknown>;
   } catch {
@@ -826,6 +845,61 @@ function warnIfConsentSkipped(opts: LifecycleOptions, id: string): void {
  * Best-effort: a consent-store write failure must not turn a successful install/upgrade into a
  * failure (the bundle is already committed) — it is surfaced as a warning, not a throw.
  */
+/**
+ * Resolve an `openai-http` reviewer lane's declared `hostConfigKey` to the destination it currently
+ * names, or `undefined` when this capability is not such a lane.
+ *
+ * Falls back to the lane's declared `defaultHost` when the key is unset, because that is exactly
+ * what the invocation path will do — binding the config value while the runtime uses the default
+ * would guarantee a mismatch on the very first review.
+ *
+ * Non-throwing: consent binding is best-effort and must never turn a successful install into a
+ * failure. An unresolvable host simply records nothing, which reads as "not bound" and allows.
+ */
+function resolveReviewerEgressHost(
+  opts: LifecycleOptions,
+  manifest: Record<string, unknown>,
+): string | undefined {
+  try {
+    const reviewer = manifest['reviewer'];
+    if (reviewer === null || typeof reviewer !== 'object' || Array.isArray(reviewer)) return undefined;
+    const r = reviewer as Record<string, unknown>;
+    if (r['transport'] !== 'openai-http') return undefined;
+    const invoke = r['invoke'];
+    if (invoke === null || typeof invoke !== 'object') return undefined;
+    const inv = invoke as Record<string, unknown>;
+    const key = typeof inv['hostConfigKey'] === 'string' ? inv['hostConfigKey'] : '';
+    const fallback = typeof inv['defaultHost'] === 'string' ? inv['defaultHost'] : '';
+
+    let configured = '';
+    if (key) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const cfgLoader = require('./config-loader.cjs') as {
+        loadConfigResolved?: (cwd: string) => { config?: Record<string, unknown> };
+      };
+      const root = projectRootMod.consentProjectRoot(opts.runtimeDir);
+      const cfg = cfgLoader.loadConfigResolved ? (cfgLoader.loadConfigResolved(root).config ?? {}) : {};
+      let cur: unknown = cfg;
+      for (const part of key.split('.')) {
+        if (cur === null || typeof cur !== 'object') { cur = undefined; break; }
+        cur = Object.prototype.hasOwnProperty.call(cur, part)
+          ? (cur as Record<string, unknown>)[part]
+          : undefined;
+      }
+      if (typeof cur === 'string') configured = cur.trim();
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { normalizeHost } = require('./review-lane-invocation.cjs') as {
+      normalizeHost: (s: string) => string;
+    };
+    const resolved = normalizeHost(configured || fallback);
+    return resolved || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function bindProjectConsent(opts: LifecycleOptions, id: string, integrity: string, manifest: Record<string, unknown>): void {
   // #1459 IC-07: a project-scope op WITHOUT a consent store cannot bind — warn (then nothing to do).
   if (!shouldBindConsent(opts)) {
@@ -843,6 +917,11 @@ function bindProjectConsent(opts: LifecycleOptions, id: string, integrity: strin
       integrity,
       disclosureSignature: trustMod.signatureForManifest(manifest),
       contentHash: consentMod.bundleContentHash(capDir(opts.runtimeDir, id)),
+      // ADR-2782 D5 rule 1 (#2799): bind the RESOLVED egress destination, not merely the config key
+      // that names it. The key lives in `.planning/config.json`, outside the SHA-pinned bundle, so
+      // without this the user consents to "wherever that key points" — a promise the bundle hash
+      // cannot keep. Phase 5b re-resolves and compares at invocation (rule 4).
+      reviewerHost: resolveReviewerEgressHost(opts, manifest),
     });
   } catch (err) {
     // #1459 IC-05/WIN-2: a consent-store write failure (read-only/UNC/NFS store) must NOT turn an
@@ -1773,6 +1852,10 @@ export = {
   // #1460 (R) HIGH: exported so the shell-unsafe-script defense-in-depth (returns null for an
   // unsafe-char script even when the file exists in the bundle) is locked in by a regression test.
   confinedBundleScript,
+  // #50: exported so the bounded fd-based read (a FIFO/device/oversized manifest or settings file is
+  // refused as null rather than hanging/OOMing under the mutation lock) is locked in by a regression test.
+  readManifest,
+  readJsonFile,
   CAP_MARKER,
   // Exported for cross-process-lock unit tests (CONC-1/CONC-2/finding-1). Not part of the public CLI
   // surface. #1459 finding 4: the lock primitive now lives in the shared capability-lock module; these

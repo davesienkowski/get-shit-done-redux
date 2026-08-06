@@ -185,7 +185,7 @@ Pesquisa, planeja e verifica uma fase.
 - Com `--view`: imprime o RESEARCH.md existente no stdout, sem criar agente. Apresenta erro se RESEARCH.md estiver ausente.
 
 **Portão de Legitimidade de Pacotes (v1.42.1):**
-Quando o pesquisador recomenda pacotes externos, executa `slopcheck install <pkg> --json` em cada um e escreve uma tabela `## Package Legitimacy Audit` no RESEARCH.md com os campos Registry, Age, Downloads, Source Repo e veredicto do slopcheck. Veredictos:
+Quando o pesquisador recomenda pacotes externos, executa `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` em cada um e escreve uma tabela `## Package Legitimacy Audit` no RESEARCH.md com os campos Registry, Age, Downloads, Source Repo e veredicto de legitimidade. Veredictos:
 
 - `[SLOP]` — pacote removido do RESEARCH.md completamente; nunca chega ao planejador
 - `[SUS]` — pacote sinalizado; o planejador insere `checkpoint:human-verify` antes da tarefa de instalação
@@ -218,7 +218,7 @@ Loop de convergência de planos cross-AI — replaneja com feedback de revisão 
 | Argumento / Flag | Obrigatório | Descrição |
 |------------------|-------------|-----------|
 | `N` | **Sim** | Número da fase a planejar e revisar |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | Não | Seleção de revisor único |
+| Flags de revisor | Não | Repassa todas as flags de lane de revisor: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | Não | Executa todos os revisores configurados em paralelo |
 | `--max-cycles N` | Não | Substitui o limite de ciclos (padrão 3) |
 
@@ -1247,6 +1247,7 @@ Revisão por pares cross-AI de planos de fase a partir de CLIs de IA externas.
 | `--qwen` | Inclui revisão pelo Qwen Code (modelos Alibaba Qwen) |
 | `--cursor` | Inclui revisão pelo agente Cursor |
 | `--agy` / `--antigravity` | Inclui revisão pelo Antigravity CLI (gratuito com credenciais Google) |
+| `--kimi-code` | Inclui revisão pelo Kimi Code CLI (Moonshot AI) |
 | `--ollama` | Inclui revisão pelo servidor Ollama |
 | `--lm-studio` | Inclui revisão pelo servidor LM Studio |
 | `--llama-cpp` | Inclui revisão pelo servidor llama.cpp |
