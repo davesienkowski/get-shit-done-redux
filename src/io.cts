@@ -124,13 +124,30 @@ function writeAllSync(fd: number, data: string): void {
   }
 }
 
+/**
+ * The wire form of a JSON result: the exact bytes `output()` emits for it.
+ *
+ * Exported because a caller that has to reason about the size of its own
+ * response — graphify's `--budget` accounting (#2738) — must measure the string
+ * this function produces rather than a second, privately-maintained
+ * serialization that can drift from it. One definition, so estimator and
+ * emitter cannot disagree about indentation or shape.
+ *
+ * The `@file:` redirection in `output()` is a transport detail, not a payload
+ * change: the caller still consumes these bytes, so these are the right ones to
+ * measure.
+ */
+function serializeForOutput(result: unknown): string {
+  return JSON.stringify(result, null, 2);
+}
+
 function output(result: unknown, raw: boolean, rawValue?: unknown): void {
   let data: string;
   if (raw && rawValue !== undefined) {
     // eslint-disable-next-line @typescript-eslint/no-base-to-string
     data = String(rawValue);
   } else {
-    const json = JSON.stringify(result, null, 2);
+    const json = serializeForOutput(result);
     // Large payloads exceed Claude Code's Bash tool buffer (~50KB).
     // Write to tmpfile and output the path prefixed with @file: so callers can detect it.
     if (json.length > 50000) {
@@ -173,6 +190,7 @@ const ERROR_REASON = Object.freeze({
   // workflow / phase
   PHASE_NOT_FOUND: 'phase_not_found',
   PHASE_VERIFICATION_INCOMPLETE: 'phase_verification_incomplete',
+  PHASE_PLAN_COVERAGE_INCOMPLETE: 'phase_plan_coverage_incomplete',
   SUMMARY_NO_PLANNING: 'summary_no_planning',
   // graphify
   GRAPHIFY_NO_GRAPH: 'graphify_no_graph',
@@ -223,6 +241,7 @@ export = {
   ensureGsdTempDir,
   reapStaleTempFiles,
   output,
+  serializeForOutput,
   ERROR_REASON,
   setJsonErrorMode,
   getJsonErrorMode,

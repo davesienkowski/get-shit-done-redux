@@ -175,10 +175,17 @@ function searchPhaseInContent(content: string, escapedPhase: string, phaseNum: s
   const modeMatch = section.match(/\*\*Mode(?::\*\*|\*\*:)\s*([^\n]+)/i);
   const mode = modeMatch ? modeMatch[1].trim().toLowerCase() : null;
 
-  // Extract success criteria as structured array
-  const criteriaMatch = section.match(/\*\*Success Criteria\*\*[^\n]*:\s*\n((?:\s*\d+\.\s*[^\n]+\n?)+)/i);
+  // Extract success criteria as structured array. A criterion may wrap onto extra
+  // indented lines (no `N.` prefix); those continuations must fold INTO their
+  // criterion, not end the run (#2522 — the old `(?:\s*\d+\.\s*[^\n]+)+` broke on a
+  // wrapped line, truncating it and silently dropping every criterion below it).
+  // `\n*` before each numbered line keeps blank-line-separated criteria working.
+  const criteriaMatch = section.match(
+    /\*\*Success Criteria\*\*[^\n]*:\s*\n((?:\n*[ \t]*\d+\.[^\n]*\n?(?:[ \t]+(?!\d+\.)[^\n]*\n?)*)+)/i);
   const success_criteria = criteriaMatch
-    ? criteriaMatch[1].trim().split('\n').map(line => line.replace(/^\s*\d+\.\s*/, '').trim()).filter(Boolean)
+    ? criteriaMatch[1].trim().split(/\n+(?=[ \t]*\d+\.)/)
+        .map(entry => entry.replace(/^\s*\d+\.\s*/, '').replace(/\s*\n\s*/g, ' ').trim())
+        .filter(Boolean)
     : [];
 
   return {
@@ -608,14 +615,31 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
     //   `**Plans**: N plans`  — bold word + outer colon (gsd-core/templates/roadmap.md)
     //   `**Plans:** N plans`  — bold "Plans:" (colon inside bold)
     //   `Plans: N plans`      — plain text header
+    //
+    // #2853: the verb owns the count token ONLY — it must not destroy hand-written
+    // prose a human placed after the count (e.g. "(11-16 are gap closure ...)").
+    // Group $1 = phase header → `Plans:` label + trailing whitespace (unchanged).
+    // Group $2 = the existing count token to replace: matches `N/N plans complete`,
+    // `N/N plans executed`, or the bare template `N plans` form. Group $3 = whatever
+    // else is on the line (`[^\r\n]*`, so CRLF `\r` is preserved).
+    //
+    // Trailing text is preserved ONLY when a real count token ($2) was present —
+    // i.e. an annotation a human wrote after a real count. When $2 is absent the
+    // line is the fresh-template bracketed placeholder (`[Number of plans…]`) or
+    // other freeform guidance, not user prose: the count replaces the whole token,
+    // preserving the pre-#2853 clean-output behaviour on the template path.
     const planCountPattern = new RegExp(
-      `(#{2,4}\\s*Phase\\s+${phasePattern}${OPTIONAL_PHASE_TAG_SOURCE}(?=[:\\s])(?:(?!\\n#{1,4}\\s)[\\s\\S])*?(?:\\*\\*Plans\\*\\*:|\\*\\*Plans:\\*\\*|(?:^|\\n)Plans:)\\s*)[^\\n]+`,
+      `(#{2,4}\\s*Phase\\s+${phasePattern}${OPTIONAL_PHASE_TAG_SOURCE}(?=[:\\s])(?:(?!\\n#{1,4}\\s)[\\s\\S])*?(?:\\*\\*Plans\\*\\*:|\\*\\*Plans:\\*\\*|(?:^|\\n)Plans:)\\s*)(\\d+\\s*\\/\\s*\\d+\\s+plans(?:\\s+(?:complete|executed))?|\\d+\\s+plans)?([^\\r\\n]*)`,
       'i'
     );
     const planCountText = isComplete
       ? `${summaryCount}/${planCount} plans complete`
       : `${summaryCount}/${planCount} plans executed`;
-    roadmapContent = replaceInCurrentMilestone(roadmapContent, planCountPattern, `$1${planCountText}`);
+    roadmapContent = replaceInCurrentMilestone(roadmapContent, planCountPattern, (_match, label, existingCount, trailing) => {
+      // Preserve trailing text only when a real count preceded it.
+      const suffix = existingCount ? trailing : '';
+      return `${label}${planCountText}${suffix}`;
+    });
 
     // If complete: check checkbox
     if (isComplete) {
@@ -774,7 +798,7 @@ function cmdRoadmapAnnotateDependencies(cwd: string, phaseNum: string | null | u
     const planPath = path.join(path.resolve(cwd, phaseInfo.directory), planFile);
     try {
       const content = fs.readFileSync(planPath, 'utf-8');
-      const fm = extractFrontmatter(content);
+      const fm = extractFrontmatter(content, planPath);
       const wave = parseInt(fm.wave as string, 10) || 1;
       const planId = planFile.replace(/-PLAN\.md$/i, '').replace(/PLAN\.md$/i, '');
       const truths = parseMustHavesBlock(content, 'truths') || [];

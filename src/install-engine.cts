@@ -28,8 +28,10 @@ import runtimeArtifactInstallPlan = require('./runtime-artifact-install-plan.cjs
 import runtimeNamePolicy = require('./runtime-name-policy.cjs');
 import installProfiles = require('./install-profiles.cjs');
 import installerMigrations = require('./installer-migrations.cjs');
+import retiredArtifactCleanup = require('./retired-artifact-cleanup.cjs');
 import { posixNormalize } from './shell-command-projection.cjs';
 import { isPathConfined } from './external-descriptor-trust.cjs';
+import { ensureCommonJsMarker } from './commonjs-marker.cjs';
 
 const { processAttribution } = runtimeArtifactConversion;
 // resolveRuntimeArtifactLayout: accessed via module ref (not destructured) so
@@ -724,6 +726,11 @@ function installRuntimeArtifacts(
   resolveAttribution: ResolveAttribution = () => undefined,
   capabilityRegistry?: any,
 ): void {
+  // A removed descriptor kind is no longer visited by the layout loop, so it
+  // cannot prune its own previous output. Clean manifest-proven retired files
+  // before materializing the current layout (#2644).
+  retiredArtifactCleanup.pruneRetiredRuntimeArtifacts(runtime, configDir);
+
   // Combined-family runtimes (OpenCode/Kilo, ADR-1239 / #2087): route through
   // the dedicated combined commands+skills+plugin orchestrator instead of the
   // generic layout-driven loop below, mirroring the bespoke install path that
@@ -1121,6 +1128,33 @@ function _installNativePluginIfDeclared(
       );
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
       fs.copyFileSync(pluginSrc, destPath);
+      // #2544: the staged adapter is a `.js` file, so Node decides its module
+      // type by walking up for the nearest package.json. It used to find the
+      // marker the installer wrote at the config root — the write that
+      // clobbered user-authored files. Pin it from the plugin's own directory
+      // instead, leaving the config root alone. The marker cannot disturb
+      // plugin discovery: OpenCode auto-discovers `plugins/*.{ts,js}` and pi's
+      // isExtensionFile() accepts only `.ts`/`.js` (see installer-migration
+      // 006), so a package.json here is never treated as a plugin. Never
+      // written over a package.json GSD does not own — but when one is already
+      // there, say so: the adapter is CommonJS and will not load under a
+      // foreign `"type": "module"`, and a silent no-op would leave every guard
+      // the adapter spawns dead with no diagnostic (the #2305 failure shape).
+      const markerOutcome = ensureCommonJsMarker(path.dirname(destPath));
+      if (markerOutcome === 'preserved-foreign') {
+        console.warn(
+          `  ⚠  ${np.dir}/package.json is not GSD's CommonJS marker — left untouched. `
+          + `If it declares "type": "module", ${np.file} will not load.`,
+        );
+      } else if (markerOutcome === 'failed') {
+        // Best-effort, never fatal: an unwritable plugin dir must not abort the
+        // install. Same warn-and-continue posture as the foreign-marker branch —
+        // the adapter is staged either way, it just may not resolve as CommonJS.
+        console.warn(
+          `  ⚠  Could not write ${np.dir}/package.json (CommonJS marker) — install continued. `
+          + `If the config root declares "type": "module", ${np.file} will not load.`,
+        );
+      }
     }
   }
 }
@@ -1276,6 +1310,12 @@ function installOpencodeFamilyArtifacts(
  * @param scope
  */
 function uninstallRuntimeArtifacts(runtime: string, configDir: string, scope: string): void {
+  // A retired descriptor kind is absent from the current uninstall plan, just
+  // as it is absent from the install plan. Sweep manifest-proven output from
+  // retired kinds before removing the current layout so a direct uninstall
+  // cannot leave stale runtime surfaces behind (#2644).
+  retiredArtifactCleanup.pruneRetiredRuntimeArtifacts(runtime, configDir);
+
   // Legacy cleanup before layout-driven removal (scope-aware to avoid
   // removing Claude local commands/gsd/ which is the primary install dir).
   // Returns saved user artifacts so we can migrate AFTER layout removal

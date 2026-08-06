@@ -20,7 +20,11 @@ import phaseLocatorMod = require('./phase-locator.cjs');
 const { findPhaseInternal } = phaseLocatorMod;
 import { extractDecisions } from './decisions.cjs';
 import type { Decision } from './decisions.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import frontmatterMod = require('./frontmatter.cjs');
+const { extractFrontmatter } = frontmatterMod;
 import { stripFencedCode, collectSections } from './markdown-sectionizer.cjs';
+import { validatePath } from './security.cjs';
 import { checkUiPresence } from './ui-safety-gate.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verifyModule = require('./verify.cjs');
@@ -38,7 +42,7 @@ const { evaluatePredicate } = gatePredicateEval;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import apiCoverageMod = require('./api-coverage.cjs');
 const { detectApiIntegration, validateCoverageMatrix } = apiCoverageMod;
-import { execTool, posixNormalize } from './shell-command-projection.cjs';
+import { execTool, platformReadSync, posixNormalize } from './shell-command-projection.cjs';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -276,13 +280,23 @@ function loadDecisionExtraction(contextPath: string): { trackable: Decision[]; o
 
 function cmdDecisionCoveragePlan(projectDir: string, args: string[], raw: boolean): void {
   const phaseDir = args[2] ? resolvePath(args[2], projectDir) : '';
-  const contextPath = args[3] ? resolvePath(args[3], projectDir) : '';
+  const contextArg = args[3];
+  const contextPath = contextArg ? resolvePath(contextArg, projectDir) : '';
 
   if (!gateEnabled(projectDir)) {
     output({ passed: true, skipped: true, reason: 'workflow.context_coverage_gate is false', total: 0, covered: 0, uncovered: [], message: 'Decision coverage gate disabled by config.' }, raw, undefined);
     return;
   }
-  if (!contextPath || !fs.existsSync(contextPath)) {
+  // #2770: an EMPTY/MISSING contextPath argument is a CALLER ERROR (the workflow
+  // forgot to pass the path — e.g. a shell variable lost between Bash blocks), not
+  // evidence the phase has no CONTEXT.md. Fail closed (mirrors #1365 fail-loud) so a
+  // blocking gate cannot silently certify success on a caller mistake.
+  if (!contextArg || contextArg === '') {
+    output({ passed: false, skipped: false, reason: 'missing context path argument', total: 0, covered: 0, uncovered: [], message: 'Decision coverage gate called without a context path argument — the caller (e.g. the plan-phase workflow) must pass the CONTEXT.md path. An empty argument is a caller error, not evidence there is nothing to check (#2770).' }, raw, undefined);
+    return;
+  }
+  // A REAL path whose file genuinely does not exist is the LEGITIMATE green skip.
+  if (!fs.existsSync(contextPath)) {
     output({ passed: true, skipped: true, reason: 'CONTEXT.md missing', total: 0, covered: 0, uncovered: [], message: 'No CONTEXT.md - nothing to check.' }, raw, undefined);
     return;
   }
@@ -957,6 +971,42 @@ function buildPredicateDeps() {
         timedOut: r.signal === 'SIGTERM',
       };
     },
+    findPhaseArtifact(phaseDir: string, artifactSuffix: string): string | null {
+      if (!fs.existsSync(phaseDir)) return null;
+      if (
+        artifactSuffix === '.' ||
+        artifactSuffix === '..' ||
+        artifactSuffix.includes('\0') ||
+        path.basename(artifactSuffix) !== artifactSuffix ||
+        path.win32.basename(artifactSuffix) !== artifactSuffix
+      ) {
+        return null;
+      }
+      const directPath = validatePath(artifactSuffix, phaseDir);
+      if (directPath.safe && fs.existsSync(directPath.resolved) && fs.statSync(directPath.resolved).isFile()) {
+        return directPath.resolved;
+      }
+      const planningPath = validatePath(path.join('.planning', artifactSuffix), phaseDir);
+      if (planningPath.safe && fs.existsSync(planningPath.resolved) && fs.statSync(planningPath.resolved).isFile()) {
+        return planningPath.resolved;
+      }
+      try {
+        const files = fs.readdirSync(phaseDir);
+        for (const f of files) {
+          if (f.endsWith('-' + artifactSuffix) || f === artifactSuffix) {
+            const candidate = validatePath(f, phaseDir);
+            if (candidate.safe && fs.statSync(candidate.resolved).isFile()) return candidate.resolved;
+          }
+        }
+      } catch { /* ignore */ }
+      return null;
+    },
+    readFrontmatter(filePath: string): Record<string, unknown> {
+      const content = platformReadSync(filePath);
+      if (content === null) throw new Error(`predicate artifact disappeared before it could be read: ${filePath}`);
+      const parsed = extractFrontmatter(content, filePath) as Record<string, unknown>;
+      return parsed;
+    }
   };
 }
 
