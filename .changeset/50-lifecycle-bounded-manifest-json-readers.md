@@ -1,0 +1,6 @@
+---
+type: Fixed
+pr: 51
+---
+
+**A repo-plantable non-regular or oversized capability file can no longer hang or OOM a capability operation under the mutation lock.** `capability-lifecycle`'s `readManifest` and `readJsonFile` read `capability.json` / shared-settings files with raw `fs.readFileSync`, so a project-planted FIFO (or symlink→`/dev/zero`/char device) whose `stat().size` is 0 sent them into an unbounded growing-buffer read — blocking forever (FIFO, no writer) or reading until OOM (`/dev/zero`) — and an oversized regular manifest was read whole. Because `reconcileCapabilities` runs automatically at the top of install/upgrade/remove, holds the mutation lock, and processes `_pending` entries from the repo-plantable project ledger (reaching `readJsonFile` via `stripCapabilitySharedEdits` → `confinedSharedFile`, whose final path component is not realpathed), this was a repo-plantable DoS. Both readers now go through the shared fd-based bounded reader (`readSmallRegularFile`, open `O_NONBLOCK` → fstat → require regular file → size cap), which the loader and ledger already use (#1459 finding 2) — a non-regular/oversized file is refused as absent (`null`) instead of hanging or reading unbounded. (#50)

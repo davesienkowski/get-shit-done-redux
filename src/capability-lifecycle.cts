@@ -298,9 +298,23 @@ function releaseLock(handle: LockHandle | null): void {
   lockMod.releaseLock(handle);
 }
 
+/**
+ * #50: max bytes for a capability.json / shared-settings JSON read through the bounded reader. Matches
+ * the loader's MANIFEST_MAX_BYTES (capability-loader.cts) — the same fd-based hardening applied here.
+ */
+const MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+
 function readManifest(dir: string): Record<string, unknown> | null {
   try {
-    const raw = fs.readFileSync(path.join(dir, 'capability.json'), 'utf8');
+    // #50: read via the SHARED fd-based bounded reader (open O_NONBLOCK → fstat → require regular file →
+    // size cap → read exactly size) instead of raw fs.readFileSync. A project-planted FIFO/device/
+    // symlink-to-device capability.json can no longer BLOCK (the raw readFileSync hang) and an oversized
+    // manifest can no longer read UNBOUNDED (OOM) under the held mutation lock — the exact #1459
+    // finding 2 hardening the loader and ledger already carry. readSmallRegularFile returns null for a
+    // genuinely-missing file and THROWS (fail-closed) for a non-regular/oversized one; either way the
+    // manifest is treated as absent.
+    const raw = ledgerMod.readSmallRegularFile(path.join(dir, 'capability.json'), MANIFEST_MAX_BYTES);
+    if (raw === null) return null;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     return parsed as Record<string, unknown>;
@@ -311,7 +325,12 @@ function readManifest(dir: string): Record<string, unknown> | null {
 
 function readJsonFile(file: string): Record<string, unknown> | null {
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    // #50: bounded fd-based read (see readManifest). A repo-plantable poison.json (symlink→/dev/zero,
+    // reachable via the reconcile → stripCapabilitySharedEdits → confinedSharedFile path, whose final
+    // component is NOT realpathed) can no longer hang/OOM the reconcile under the mutation lock.
+    const raw = ledgerMod.readSmallRegularFile(file, MANIFEST_MAX_BYTES);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     return parsed as Record<string, unknown>;
   } catch {
@@ -1833,6 +1852,10 @@ export = {
   // #1460 (R) HIGH: exported so the shell-unsafe-script defense-in-depth (returns null for an
   // unsafe-char script even when the file exists in the bundle) is locked in by a regression test.
   confinedBundleScript,
+  // #50: exported so the bounded fd-based read (a FIFO/device/oversized manifest or settings file is
+  // refused as null rather than hanging/OOMing under the mutation lock) is locked in by a regression test.
+  readManifest,
+  readJsonFile,
   CAP_MARKER,
   // Exported for cross-process-lock unit tests (CONC-1/CONC-2/finding-1). Not part of the public CLI
   // surface. #1459 finding 4: the lock primitive now lives in the shared capability-lock module; these
