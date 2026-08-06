@@ -96,6 +96,33 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
 }
 
+/**
+ * Deterministic JSON serialization with recursively key-SORTED object keys, so two deep-equal
+ * mappings that differ only in key insertion order serialize identically. Array order is
+ * PRESERVED (arrays are ordered). Used ONLY for the object/array comparison branch of
+ * `evaluateArtifactFrontmatterEquals`; the scalar `String()` coercion path is untouched.
+ *
+ * Fixes #42: plain `JSON.stringify` is key-insertion-order dependent, so an object-valued gate
+ * `equals` (e.g. `{a:1,b:2}`) spuriously BLOCKED an artifact whose frontmatter mapping was the
+ * deep-equal reordering (`{b:2,a:1}`). Scalars keep the identical `String()` coercion the
+ * property test in `gate-predicate-evaluator-missing.test.cjs` pins.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    // Reached only via recursion into a container. Mirror JSON.stringify, mapping the
+    // JSON-invalid `undefined` to `null` exactly as JSON.stringify does inside an array.
+    return JSON.stringify(value ?? null);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((el) => stableStringify(el === undefined ? null : el)).join(',')}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined) // JSON.stringify omits undefined-valued object keys
+    .sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+}
+
 // ─── Kind: command-exit-zero ──────────────────────────────────────────────────
 
 function evaluateCommandExitZero(
@@ -183,9 +210,9 @@ function evaluateArtifactFrontmatterEquals(
 
   const actualValue = fm[field];
   // eslint-disable-next-line @typescript-eslint/no-base-to-string
-  const expectedStr = typeof expectedValue === 'object' ? JSON.stringify(expectedValue) : String(expectedValue);
+  const expectedStr = typeof expectedValue === 'object' ? stableStringify(expectedValue) : String(expectedValue);
   // eslint-disable-next-line @typescript-eslint/no-base-to-string
-  const actualStr = typeof actualValue === 'object' ? JSON.stringify(actualValue) : String(actualValue);
+  const actualStr = typeof actualValue === 'object' ? stableStringify(actualValue) : String(actualValue);
 
   const matches = actualValue === expectedValue || (actualValue !== undefined && actualValue !== null && actualStr === expectedStr);
   if (matches) {
