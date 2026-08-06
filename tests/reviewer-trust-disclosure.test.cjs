@@ -317,6 +317,91 @@ describe('A. Signature stability — the absent-safe invariant', () => {
     );
     assert.equal(trust.executableSetChanged(before, after), false, 'timeoutFloorMs is not an executable-surface property');
   });
+
+  // ── A-1 (#44): the reviewer-lane signature must bind the FULL declared `invoke` object, not a
+  // curated subset. Before the completeness backstop, a v2 that changed ONLY invoke.defaultHost /
+  // path / outputArg / modelArg re-consented SILENTLY on upgrade (executableSetChanged=false) and
+  // re-bound the egress host, defeating the ADR-2782 D5 egress-consent guard. These pin re-consent
+  // on each such change. None of these fields is in the pre-fix whitelist
+  // (binary/args/hostConfigKey/promptChannel/handler), so each fails RED before the rawInvoke fold.
+  test('changingDefaultHostForcesReconsent', () => {
+    // The headline: defaultHost is the egress destination when the config key is unset. A malicious
+    // v2 that changes ONLY defaultHost must NOT be silently re-consented on upgrade.
+    const before = trust.discloseExecutableSurfaces(
+      httpLaneManifest((m) => {
+        m.reviewer.invoke.defaultHost = 'https://api.openai.com';
+      }),
+    );
+    const after = trust.discloseExecutableSurfaces(
+      httpLaneManifest((m) => {
+        m.reviewer.invoke.defaultHost = 'https://evil-exfil.example';
+      }),
+    );
+    assert.equal(
+      trust.executableSetChanged(before, after),
+      true,
+      'defaultHost is the egress destination (review-lane-invocation.cts:348) — a change must force re-consent (ADR-2782 D5)',
+    );
+  });
+
+  test('changingLanePathForcesReconsent', () => {
+    // path is the egress ENDPOINT (`${host}${apiPath}`), not host-scoped, so the D5 host guard never
+    // even applies to it — the signature is the only thing that can catch a change.
+    const before = trust.discloseExecutableSurfaces(httpLaneManifest());
+    const after = trust.discloseExecutableSurfaces(
+      httpLaneManifest((m) => {
+        m.reviewer.invoke.path = '/collect';
+      }),
+    );
+    assert.equal(
+      trust.executableSetChanged(before, after),
+      true,
+      'path is the egress endpoint (review-lane-invocation.cts:356) — a change must force re-consent',
+    );
+  });
+
+  test('changingSpawnOutputAndModelArgForcesReconsent', () => {
+    // outputArg/modelArg are injected verbatim into the SPAWNED reviewer argv
+    // (review-lane-invocation.cts:399-408,:432-433) — the exact #1459 arg-injection class, one level
+    // deeper. A change alters WHAT runs and must force re-consent even with binary/args unchanged.
+    const before = trust.discloseExecutableSurfaces(
+      spawnLaneManifest((m) => {
+        m.reviewer.invoke.outputArg = '--out';
+        m.reviewer.invoke.modelArg = '--model';
+      }),
+    );
+    const after = trust.discloseExecutableSurfaces(
+      spawnLaneManifest((m) => {
+        m.reviewer.invoke.outputArg = '--exfil';
+        m.reviewer.invoke.modelArg = '--evil-model';
+      }),
+    );
+    assert.equal(
+      trust.executableSetChanged(before, after),
+      true,
+      'outputArg/modelArg are injected into the spawned reviewer argv — a change alters WHAT runs and must force re-consent',
+    );
+  });
+
+  test('laneInvokeKeyReorderDoesNotForceReconsent', () => {
+    // The A11/A12 no-false-reprompt guarantee must survive the rawInvoke fold: a pure key reorder
+    // INSIDE the declared invoke object is deep-equal and must NOT re-prompt (stableJson key-sorts).
+    const before = trust.discloseExecutableSurfaces(
+      httpLaneManifest((m) => {
+        m.reviewer.invoke = { hostConfigKey: 'lmStudio.baseUrl', path: '/v1/chat/completions', defaultHost: 'https://api.openai.com' };
+      }),
+    );
+    const after = trust.discloseExecutableSurfaces(
+      httpLaneManifest((m) => {
+        m.reviewer.invoke = { defaultHost: 'https://api.openai.com', path: '/v1/chat/completions', hostConfigKey: 'lmStudio.baseUrl' };
+      }),
+    );
+    assert.equal(
+      trust.executableSetChanged(before, after),
+      false,
+      'a pure key reorder inside invoke is deep-equal — stableJson key-sorts rawInvoke, so no false re-prompt',
+    );
+  });
 });
 
 // ─── B. What is disclosed ───────────────────────────────────────────────────

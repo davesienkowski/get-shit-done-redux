@@ -220,6 +220,23 @@ interface ReviewerLaneSurface {
    * honestly (Kerckhoffs's Principle) rather than disclosed as an unhelpful "sends data to the tool".
    */
   egressPayloadClasses: string[];
+  /**
+   * A-1 (#44): the FULL declared `invoke` object (prototype-pollution-safe shallow copy) — the
+   * consent-completeness backstop, exactly like `McpServerSurface.rawConfig` (Finding 5, #1459). The
+   * curated fields above (`binary`/`args`/`hostConfigKey`/`promptChannel`) are kept for the human
+   * summary and readability, but the invocation resolver (`src/review-lane-invocation.cts`) ALSO
+   * reads `defaultHost` (:348 — the egress destination when the config key is unset), `path` (:356 —
+   * the egress endpoint), `modelDiscovery`/`fallbackModel`, and
+   * `outputChannel`/`outputArg`/`modelArg`/`effortChannel` (injected into the spawned reviewer argv).
+   * Binding only the curated subset let a v2 that changed ONLY `invoke.defaultHost` re-consent
+   * SILENTLY on upgrade and re-bind the egress host, defeating the ADR-2782 D5 egress-consent guard.
+   * `disclosureSignature` folds this STABLE-encoded (recursively key-sorted) so any add/change forces
+   * re-consent while a pure key reorder does NOT (A11/A12 preserved). Cosmetic reviewer fields
+   * (`reviewsSection`/`timeoutFloorMs`/`probe`/`emptyOutput`) are TOP-LEVEL reviewer fields, NOT
+   * inside `invoke`, so their deliberate exclusion (A10/A13) is untouched. Empty object when the
+   * lane declares no (or a malformed) `invoke`.
+   */
+  rawInvoke: Record<string, unknown>;
 }
 
 interface Disclosure {
@@ -619,6 +636,19 @@ function collectReviewerLaneSurfaces(
     const hostConfigKey = asString(invoke['hostConfigKey']);
     const promptChannel = asString(invoke['promptChannel']);
 
+    // A-1 (#44): capture the WHOLE declared `invoke` object as the consent-completeness backstop
+    // (mirrors the MCP `rawConfig` capture above — Finding 5, #1459). The curated scalars above stay
+    // for the human summary; `rawInvoke` is what makes `disclosureSignature` re-consent on a change to
+    // ANY invoke field the resolver honors (defaultHost/path/outputArg/modelArg/…), not just the
+    // whitelisted four. Prototype-pollution-safe: copy own enumerable keys only, never
+    // __proto__/constructor/prototype. Stable-encoded downstream, so a pure key reorder still does not
+    // re-prompt (A11/A12). Empty object for a lane with no/malformed `invoke` (matrix C3).
+    const rawInvoke: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(invoke)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+      rawInvoke[k] = v;
+    }
+
     // An EMPTY (or wholly unrecognised) reviewer body declares no lane and must
     // not be treated as one. Without this, `reviewer: {}` alone flips
     // hasExecutable true and perturbs the disclosure signature — producing a
@@ -683,6 +713,8 @@ function collectReviewerLaneSurfaces(
       // B5: every lane receives the same named egress payload classes — a fresh copy per surface so
       // no caller can mutate the shared constant through a returned surface.
       egressPayloadClasses: [...EGRESS_PAYLOAD_CLASSES],
+      // A-1 (#44): the full-invoke consent-completeness backstop (see the field's doc comment).
+      rawInvoke,
     };
     return [surface];
   }, []);
@@ -1074,15 +1106,22 @@ function disclosureSignature(d: Disclosure): string {
     .sort();
   // ADR-2782 D5 (#2796): fold in slug/transport/binary/rawArgs/hostConfigKey/promptChannel/handler —
   // every field that changes WHAT runs, WHERE it sends data, or WHAT CODE post-processes its output
-  // (matrix A3–A9). Deliberately ABSENT from this line: `reviewsSection` and `timeoutFloorMs` (matrix
-  // A10/A13 — cosmetic fields; folding them in would force a re-consent prompt that carries no
-  // security information, training users to click through) and the RESOLVED host (design constraint
-  // 2 — the loader has no config resolver and must compute the SAME signature as the lifecycle, or a
+  // (matrix A3–A9). A-1 (#44): ALSO fold the FULL declared `invoke` object (`rawInvoke`) as the
+  // completeness backstop — exactly as the mcp line folds `rawConfig` (Finding 5, #1459). The curated
+  // scalars stay FIRST for readability/stability; `rawInvoke` guarantees a change to ANY invoke field
+  // the resolver honors but the whitelist omits (defaultHost = egress destination, path = egress
+  // endpoint, outputArg/modelArg/effortChannel = injected argv on the spawned binary) forces
+  // re-consent — closing the silent-egress-redirect-on-upgrade hole. STABLE-encoded (recursively
+  // key-sorted) so a pure key reorder does NOT re-prompt. Deliberately ABSENT from this line:
+  // `reviewsSection` and `timeoutFloorMs` (matrix A10/A13 — cosmetic TOP-LEVEL reviewer fields, NOT
+  // inside `invoke`; folding them would force a re-consent prompt that carries no security
+  // information, training users to click through) and the RESOLVED host (design constraint 2 — the
+  // loader has no config resolver and must compute the SAME signature as the lifecycle, or a
   // resolver-bearing caller and a resolver-less caller would permanently disagree on one manifest's
   // signature).
   const lanes = d.reviewerLanes
     .map((l) =>
-      stableJson(['lane', l.slug, l.transport, l.binary, l.rawArgs || [], l.hostConfigKey, l.promptChannel, l.handler]),
+      stableJson(['lane', l.slug, l.transport, l.binary, l.rawArgs || [], l.hostConfigKey, l.promptChannel, l.handler, l.rawInvoke || {}]),
     )
     .sort();
   // D4.5 (the highest-consequence line in this phase): the lane element is appended ONLY when at

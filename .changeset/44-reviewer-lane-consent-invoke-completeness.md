@@ -1,0 +1,6 @@
+---
+type: Fixed
+pr: 45
+---
+
+**A reviewer-lane capability upgrade that changes only its egress destination now re-prompts for consent.** The consent-binding signature (`disclosureSignature`) folded only a curated subset of a reviewer lane's `invoke` fields (`binary`/`args`/`hostConfigKey`/`promptChannel`/`handler`), while the invocation resolver also honors `defaultHost` (the egress destination when the config key is unset), `path` (the egress endpoint), and `outputArg`/`modelArg`/`effortChannel` (injected into the spawned reviewer's argv). Because the upgrade path re-prompts only when the signature changes, a v2 of a lane-bearing capability that changed **only** `invoke.defaultHost` was re-consented silently and re-bound the egress host — redirecting plan/requirements/research/CONTEXT egress to a new destination with no prompt, defeating the ADR-2782 D5 egress-consent guard. The lane signature now folds the **full** declared `invoke` object as a completeness backstop (mirroring the MCP-server `rawConfig` backstop from #1459), stable-encoded so a pure key reorder still does not re-prompt; cosmetic top-level reviewer fields (`reviewsSection`/`timeoutFloorMs`/`probe`) remain deliberately excluded. Lane-bearing capabilities re-consent once on next upgrade — as intended, exactly as #1459 required for MCP servers. (#44)
