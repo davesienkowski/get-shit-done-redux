@@ -8,12 +8,22 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const cp = require('node:child_process');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const COMMAND_PATH = path.join(REPO_ROOT, 'commands', 'gsd', 'autonomous.md');
 const WORKFLOW_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'autonomous.md');
 const COMMANDS_DOC_PATH = path.join(REPO_ROOT, 'docs', 'COMMANDS.md');
 const HOW_TO_PATH = path.join(REPO_ROOT, 'docs', 'how-to', 'run-phases-autonomously.md');
+const TOOLS = path.join(REPO_ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
+// #2994: fragmentization moved the five converge-gated regions out of the host
+// autonomous.md into dedicated step files (state:plan-strategy-converge) —
+// see docs/reference/workflow-fragments.md. Tests that assert on this moved
+// content read the step file directly rather than the host.
+const STEP_FAIL_FAST_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'autonomous', 'steps', 'converge-fail-fast.md');
+const STEP_DISPATCH_BG_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'autonomous', 'steps', 'converge-dispatch-bg.md');
+const STEP_DISPATCH_INLINE_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'autonomous', 'steps', 'converge-dispatch-inline.md');
+const STEP_LOOP_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'autonomous', 'steps', 'converge-loop.md');
 
 function read(filePath) {
   return fs.readFileSync(filePath, 'utf8');
@@ -45,30 +55,50 @@ describe('autonomous --converge flag (#711)', () => {
   });
 
   test('workflow fails fast when convergence is requested but disabled', () => {
+    // #2994: this check lives in the converge-fail-fast step file now
+    // (state:plan-strategy-converge) — the host only carries the gated
+    // conditional-read stub.
     const workflow = read(WORKFLOW_PATH);
+    const step = read(STEP_FAIL_FAST_PATH);
 
     assert.match(
       workflow,
-      /config-get workflow\.plan_review_convergence/,
-      'workflow should check workflow.plan_review_convergence before planning',
+      /gsd:section id="converge-fail-fast" when="state:plan-strategy-converge"/,
+      'workflow should gate the fail-fast check behind state:plan-strategy-converge',
     );
     assert.match(
-      workflow,
+      step,
+      /config-get workflow\.plan_review_convergence/,
+      'converge-fail-fast step should check workflow.plan_review_convergence before planning',
+    );
+    assert.match(
+      step,
       /gsd config-set workflow\.plan_review_convergence true/,
-      'workflow should print the enable command instead of silently downgrading',
+      'converge-fail-fast step should print the enable command instead of silently downgrading',
     );
   });
 
   test('workflow routes planning through plan-review-convergence when enabled', () => {
+    // #2994: the converge dispatch/loop bodies live in dedicated step files
+    // now (state:plan-strategy-converge) — only the local-planning fallback
+    // remains inline in the host.
     const workflow = read(WORKFLOW_PATH);
+    const dispatchInline = read(STEP_DISPATCH_INLINE_PATH);
+    const loop = read(STEP_LOOP_PATH);
+    const dispatchBg = read(STEP_DISPATCH_BG_PATH);
 
     assert.match(
-      workflow,
+      dispatchInline,
       /Skill\(skill="gsd-plan-review-convergence", args="\$\{PHASE_NUM\} \$\{CONVERGENCE_ARGS\}"\)/,
-      'non-interactive converge mode should call gsd-plan-review-convergence',
+      'inline converge dispatch step should call gsd-plan-review-convergence',
     );
     assert.match(
-      workflow,
+      loop,
+      /Skill\(skill="gsd-plan-review-convergence", args="\$\{PHASE_NUM\} \$\{CONVERGENCE_ARGS\}"\)/,
+      'default converge loop step should call gsd-plan-review-convergence',
+    );
+    assert.match(
+      dispatchBg,
       /Run plan convergence for phase \$\{PHASE_NUM\}: Skill\(skill=\\"gsd-plan-review-convergence\\"/,
       'interactive converge mode should dispatch plan convergence in the background agent',
     );
@@ -81,7 +111,11 @@ describe('autonomous --converge flag (#711)', () => {
 
   test('workflow forwards reviewer flags and max cycles to convergence', () => {
     const workflow = read(WORKFLOW_PATH);
-    const reviewerFlags = [
+    // Non-lane convergence controls remain hand-written literals in the workflow.
+    const convergenceControls = ['--all', '--text'];
+    // Reviewer lane flags that were formerly hand-enumerated in the workflow text.
+    // They must now be DERIVED at runtime via `gsd_run review-lane flags`, not listed.
+    const formerlyHardcodedLaneFlags = [
       '--codex',
       '--gemini',
       '--claude',
@@ -89,15 +123,46 @@ describe('autonomous --converge flag (#711)', () => {
       '--ollama',
       '--lm-studio',
       '--llama-cpp',
-      '--all',
-      '--text',
     ];
+    // The literal-absence guard below excludes '--claude': the runtime-launcher
+    // preamble legitimately contains an unrelated "npx ... --claude --local"
+    // install-runtime flag, so a substring match on '--claude' would false-positive
+    // against that literal, not against a re-added reviewer-flag list.
+    const antiParityLaneFlags = formerlyHardcodedLaneFlags.filter((flag) => flag !== '--claude');
 
     assert.match(workflow, /CONVERGENCE_ARGS/, 'workflow should build convergence pass-through args');
-    for (const flag of reviewerFlags) {
+    assert.match(
+      workflow,
+      /gsd_run review-lane flags/,
+      'workflow should derive reviewer flags from the review-lane roster instead of hand-listing them',
+    );
+    for (const flag of convergenceControls) {
       assert.ok(workflow.includes(flag), `workflow should pass through ${flag}`);
     }
     assert.match(workflow, /--max-cycles/, 'workflow should pass through --max-cycles N');
+
+    // Anti-parity guard (deliberately inverted polarity): the whole point of the
+    // review-lane-flags derivation is that reviewer lane flags are declared ONCE
+    // (in the review-lane roster) and never hand-listed again in workflow prose.
+    // If a future edit re-adds a hardcoded reviewer-flag list here, that is the
+    // regression this test exists to catch — so this assertion must FAIL when
+    // any of these flags reappear as literals in the workflow text.
+    for (const flag of antiParityLaneFlags) {
+      assert.ok(
+        !workflow.includes(flag),
+        `workflow should NOT hand-enumerate reviewer lane flag ${flag}; it must be derived via review-lane flags`,
+      );
+    }
+
+    // Behavioral coverage: prove the roster the workflow derives from actually
+    // yields the flags this test used to hardcode, so the derivation is not vacuous.
+    const laneFlags = cp
+      .execFileSync(process.execPath, [TOOLS, 'review-lane', 'flags'], { encoding: 'utf8' })
+      .split('\n')
+      .filter(Boolean);
+    for (const flag of formerlyHardcodedLaneFlags) {
+      assert.ok(laneFlags.includes(flag), `review-lane flags should include ${flag}`);
+    }
   });
 
   test('docs show autonomous convergence usage', () => {
@@ -174,15 +239,12 @@ describe('autonomous verification deferral contract', () => {
     assert.ok(waitIdx !== -1, 'workflow must document the post-execution verification read');
     assert.ok(humanNeededIdx > waitIdx, 'human_needed branch must follow verification status read');
     assert.ok(promoteIdx > humanNeededIdx, 'human_needed branch must contain the promotion action');
-    assert.match(
-      section,
-      /VERIFY_STATUS=\$\(gsd_run query verification\.status "\$\{PHASE_DIR\}" 2>\/dev\/null \| jq -r '\.status\/\/empty'\)/,
-      'autonomous must route human validation through canonical verification.status',
-    );
-    assert.match(
-      section,
-      /jq -r '\.status\/\/empty'/,
-      'autonomous must parse the projected canonical status value',
+    // #2589: the verification read uses the native --pick flag (no jq dependency).
+    // String-based check (not a regex literal) so the assertion stays robust to
+    // shell metacharacters in the snippet and parses cleanly under espree.
+    assert.ok(
+      section.includes('VERIFY_STATUS=$(gsd_run query verification.status "${PHASE_DIR}" --pick status 2>/dev/null || true)'),
+      'autonomous must route human validation through canonical verification.status via the native --pick flag',
     );
     assert.doesNotMatch(
       section,

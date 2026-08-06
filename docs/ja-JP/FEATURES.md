@@ -1163,9 +1163,9 @@ fix(03-01): correct auth token expiry
 
 ### 42. クロス AI ピアレビュー
 
-**コマンド:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--all]`
+**コマンド:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
 
-**目的:** 外部の AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity）を呼び出して、フェーズプランを独立してレビューします。レビュアーごとのフィードバックを含む構造化された REVIEWS.md を生成します。
+**目的:** 外部の AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）とローカルの OpenAI 互換サーバー（Ollama、LM Studio、llama.cpp）を呼び出して、フェーズプランを独立してレビューします。レビュアーごとのフィードバックを含む構造化された REVIEWS.md を生成します。
 
 **要件:**
 - REQ-REVIEW-01: システムはシステム上で利用可能な AI CLI を検出しなければならない
@@ -2805,7 +2805,7 @@ Source commit: abc1234 (3 commits behind HEAD)
 - Executor のインストール失敗は、同様の名前のパッケージを自動的に試みる代わりに人間の確認のために停止する。
 
 **要件:**
-- REQ-PKG-GATE-01: リサーチはパッケージレジストリ、年齢、ダウンロード/ソースシグナル、スロップチェック verdict、および処分を記録しなければならない。
+- REQ-PKG-GATE-01: リサーチはパッケージレジストリ、年齢、ダウンロード/ソースシグナル、正当性判定、および処分を記録しなければならない。
 - REQ-PKG-GATE-02: プランナーは実行前に未検証または疑わしいパッケージのインストールをゲートしなければならない。
 - REQ-PKG-GATE-03: Executor はパッケージマネージャーのインストール失敗後にパッケージ名を自動置換してはならない。
 

@@ -127,6 +127,8 @@ node gsd-tools.cjs phase insert <after> <description>
 node gsd-tools.cjs phase remove <phase> [--force]
 
 # Mark phase complete, update state + roadmap
+# Also emits advisory `warnings[]` when a phase SUMMARY references a file that
+# is not on disk — see "Phase SUMMARY artifact check" below.
 node gsd-tools.cjs phase complete <phase>
 
 # Evaluate HUMAN-UAT results for a phase (markdown-aware; ignores false-positive contexts)
@@ -139,6 +141,31 @@ node gsd-tools.cjs phase-plan-index <phase>
 # List phases with filtering
 node gsd-tools.cjs phases list [--type planned|executed|all] [--phase N] [--include-archived]
 ```
+
+### Phase SUMMARY artifact check
+
+A phase `SUMMARY.md` asserts which files the phase created or modified. On
+`phase complete`, each SUMMARY in the phase is scanned for referenced file paths
+and any path that is not on disk is reported in the command's existing
+`warnings[]` array — the case where a summary reports work that never landed.
+
+**Advisory only.** Findings never block completion; the completion gate is the
+phase's `VERIFICATION.md` status, which this does not touch. `/gsd-execute-phase`
+surfaces the warnings before advancing.
+
+Scope and limits, so the output is not read as more than it is:
+
+- Paths are recovered heuristically from the SUMMARY body — backticked paths and
+  `Created:`/`Modified:`-style lines. Globs, URLs, bare hostnames, and paths
+  resolving outside the project are skipped rather than reported.
+- The `key-files:` frontmatter block is **not** read. Its YAML flow-sequence form
+  (`created: [a.ts, b.ts]`) is not matched by the prose scan, so a summary whose
+  only file claims live there produces no findings.
+- Commit hashes in the SUMMARY are **not** resolved here. The pattern matches any
+  hex-shaped token in prose, which is too loose to surface.
+
+Every path the scan does recover is checked — there is no cap. The standalone
+`verify-summary` verb keeps its historical default of checking the first two.
 
 ---
 
@@ -295,6 +322,47 @@ This command is strictly read-only — no config writes, no disk mutation.
 
 ---
 
+### `query context-predicates`
+
+```bash
+node gsd-tools.cjs query context-predicates --class <CLASS> | --prefix <dotted.prefix> | --contains <text>
+```
+
+Selector surface for the `CONTEXT.md` predicate fact-store (ADR-1671, #2928). Parses the repo-root `CONTEXT.md` **live** on every call via the compiled `context-predicates.cjs` — it never reads the committed `docs/CONTEXT-INDEX.json` (that artifact is a CI drift-guard byproduct, not a query source, so it can never go stale relative to the live predicates it answers about).
+
+**Selectors** (at least one required; when more than one is given they are ANDed together):
+
+| Flag | Type | Description |
+|---|---|---|
+| `--class <CLASS>` | string | Exact match on the predicate's class (the segment before the first `.`) |
+| `--prefix <dotted.prefix>` | string | Match predicate ids starting with this dotted prefix |
+| `--contains <text>` | string | Case-insensitive substring match against `id + ' ' + value` |
+
+Each flag also accepts the inline-assignment form (`--contains=<text>`), which is the escape
+hatch for a flag-shaped value the space-separated form cannot express — e.g.
+`--contains=--dry-run` to search for the literal substring `--dry-run`. The space-separated form
+(`--contains --dry-run`) always reads a following `--...` token as a missing value, by design.
+
+**Output JSON:**
+
+```json
+{
+  "matched": 2,
+  "predicates": [
+    { "id": "RULESET.EXAMPLE", "klass": "RULESET", "value": "…", "line": 42, "section": "Glossary" }
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `matched` | number | Count of predicates satisfying all given selectors |
+| `predicates` | array | Each entry is a live `Predicate` — `id`, `klass`, `value`, `line` (1-based source line), `section` (nearest enclosing heading) |
+
+This command is strictly read-only — no config writes, no disk mutation. See [ADR-1671](adr/1671-dynamic-context-management-platform.md) and [Architecture — CLI Tools](ARCHITECTURE.md#cli-tools-gsd-corebin).
+
+---
+
 ## Model Resolution
 
 ```bash
@@ -433,10 +501,19 @@ node gsd-tools.cjs init quick <description>
 node gsd-tools.cjs init resume
 node gsd-tools.cjs init verify-work <phase>
 node gsd-tools.cjs init phase-op <phase>
+node gsd-tools.cjs init code-review <phase> [--fix]
+node gsd-tools.cjs init review <phase>
+node gsd-tools.cjs init discuss-phase-assumptions <phase> [--auto]
 node gsd-tools.cjs init todos [area]
 node gsd-tools.cjs init milestone-op
 node gsd-tools.cjs init map-codebase
 node gsd-tools.cjs init progress
+node gsd-tools.cjs init manager
+node gsd-tools.cjs init complete-milestone
+node gsd-tools.cjs init autonomous [--converge] [--cross-ai]
+node gsd-tools.cjs init docs-update
+node gsd-tools.cjs init update [--next] [--rc]
+node gsd-tools.cjs init transition
 
 # Workstream-scoped init (`--ws` flag)
 node gsd-tools.cjs init execute-phase <phase> --ws <name>
@@ -568,9 +645,55 @@ node gsd-tools.cjs commit <message> [--files f1 f2] [--amend] [--no-verify] [--r
 > `--no-verify`: Skips pre-commit hooks. Used by parallel executor agents during wave-based execution to avoid build lock contention (e.g., cargo lock fights in Rust projects). The orchestrator runs hooks once after each wave completes. Do not use `--no-verify` during sequential execution — let hooks run normally.
 > `--files <paths>` **staging behaviour**: by default, `--files` runs `git add -- <path>` for each named file before committing. This overwrites any per-hunk staging set up via `git add -p`. Pass `--respect-staged` to skip the `git add` step and commit only what is already in the index within the requested pathspec. If nothing is staged within that scope, the command returns `{ committed: false, reason: 'nothing staged' }` without error. The trailing `-- <paths>` pathspec on the commit is applied under both modes, so files staged outside the `--files` scope are never included (#3061 invariant).
 
+```bash
 # Web search (requires Brave API key)
 node gsd-tools.cjs websearch <query> [--limit N] [--freshness day|week|month]
 ```
+
+---
+
+## Update Backup and Restore
+
+The two halves of `/gsd:update`'s user-added-file protection. `detect-custom-files`
+lists files that exist inside GSD-managed directories but are absent from
+`gsd-file-manifest.json` — the update workflow copies those into
+`gsd-user-files-backup/` before the clean-install wipe. `restore-custom-files`
+puts them back afterwards.
+
+```bash
+# List user-added files the installer would destroy (JSON)
+node gsd-tools.cjs detect-custom-files --config-dir <config-dir>
+
+# Plan a restore — reports what would be restored, writes nothing
+node gsd-tools.cjs restore-custom-files --config-dir <config-dir>
+
+# Restore the eligible entries
+node gsd-tools.cjs restore-custom-files --config-dir <config-dir> --apply
+```
+
+`restore-custom-files` emits one entry per backed-up file:
+
+| Field | Meaning |
+|---|---|
+| `path` | Path relative to the config dir — where the file came from and goes back to |
+| `outcome` | `eligible` (plan mode) · `restored` · `skipped_destination_managed` · `skipped_destination_exists` · `skipped_copy_failed` · `skipped_unsafe_path` |
+| `warnings` | Advisory `{code, detail}` findings from the compatibility pass; never blocks a restore |
+
+Warning codes: `destination_managed`, `destination_exists`,
+`missing_referenced_path`, `missing_referenced_command`,
+`frontmatter_missing_field`, `write_failed`.
+
+The compatibility pass runs against the **newly installed** release, so it
+catches a backed-up skill that `@`-references a workflow the new version
+retired, invokes a `/gsd:` command that no longer exists, or is missing the
+`name` / `description` frontmatter its runtime needs.
+
+Three things the restore never does: it never deletes the backup, it never
+overwrites a path the new release ships (`skipped_destination_managed`), and it
+never overwrites a different file already on disk
+(`skipped_destination_exists`). Symlinked backup entries are skipped outright
+rather than followed (`skipped_unsafe_path`). A single unwritable entry is
+reported and the remaining entries still restore.
 
 ---
 
@@ -666,6 +789,7 @@ User-facing entry point: `/gsd-graphify` (see [Command Reference](COMMANDS.md#gs
 | Audit | `lib/audit.cjs` | Phase/milestone audit queue handlers; `audit-open` helper |
 | GSD2 Import | `lib/gsd2-import.cjs` | Reverse-migration importer from GSD-2 projects (backs `/gsd-import --from-gsd2`) |
 | Intel | `lib/intel.cjs` | Queryable codebase intelligence index (backs `/gsd-map-codebase --query`) |
+| Context Predicates | `lib/context-predicates.cjs` | `CONTEXT.md` predicate fact-store parser/selector (ADR-1671, #2928) — backs `query context-predicates` and `scripts/gen-context-index.cjs`'s `docs/CONTEXT-INDEX.json` drift guard |
 | Capability State | `lib/capability-state.cjs` | Capability-state resolver — composes install profile, surface, and config into per-capability `enabled`/`active` view |
 | Capability Writer | `lib/capability-writer.cjs` | Capability-state writer (ADR-1213) — write-side inverse; projects `--on`/`--off`/`--gate` onto surface + config substrates then re-resolves |
 | Worktree Base Ref | `lib/worktree-base-ref.cjs` | Worktree fork-base detection and `worktree base-check` / `set-baseref` commands (#683) |

@@ -1,7 +1,7 @@
 {
   "id": "kimi",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.9.1",
   "title": "Kimi CLI",
   "description": "Kimi CLI (Moonshot AI) — generic agents root at ~/.config/agents; skills + kimi-agents artifact layout; native config.toml [[hooks]] bus at ~/.kimi/config.toml; background dispatch; tier-2 support.",
   "tier": "core",
@@ -77,6 +77,14 @@
       "transport": "mcp",
       "runtime": "python",
       "effortSurface": "undocumented"
+    },
+    "orchestratorExec": {
+      "command": "kimi",
+      "args": [
+        "--print"
+      ],
+      "cwdFlag": "--work-dir",
+      "promptFlag": "--prompt"
     },
     "hostBehaviors": {
       "reapplyCommand": "/skill:gsd-update --reapply",

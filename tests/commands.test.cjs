@@ -1303,7 +1303,7 @@ describe('resolve-model command', () => {
 
 describe('commit command', () => {
   const { createTempGitProject } = require('./helpers.cjs');
-  const { execSync } = require('child_process');
+  const { execSync, execFileSync } = require('child_process');
   let tmpDir;
 
   beforeEach(() => {
@@ -1489,6 +1489,154 @@ describe('commit command', () => {
     const { execFileSync } = require('child_process');
     const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
     assert.strictEqual(branch, 'gsd/phase-45.14-golden-capture', 'should be on decimal phase branch, not integer-only');
+  });
+
+  // #2539: the phase-token extraction must be anchored to the path segment under
+  // .planning/phases/ and reuse the project-code-aware extractPhaseToken helper.
+  // The prior unanchored `match(/(\d+(?:\.\d+)*)-/)` matched the leftmost
+  // digit-run-then-hyphen anywhere in the joined file path, so a project_code
+  // ending in a digit (e.g. PROJECT_V2) made `.../PROJECT_V2-07-name/...` match
+  // the `2-` inside `V2-` BEFORE reaching the real `07-` phase token —
+  // resolving phase "2" instead of phase "7". findPhaseInternal also searches
+  // archived milestones, so an existing archived phase 2 produced a real branch
+  // name, and the silent `git checkout <existing-branch>` fallback switched the
+  // whole working tree onto the wrong branch in the same call that then
+  // committed. This fixture reproduces both preconditions.
+  test('#2539: digit-suffixed project_code does not collide with the phase number', () => {
+    // Configure phase branching strategy with a project_code ending in a digit.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        commit_docs: true,
+        project_code: 'PROJECT_V2',
+        branching_strategy: 'phase',
+        phase_branch_template: 'gsd/phase-{phase}-{slug}',
+      })
+    );
+
+    // Archived phase 02 under a shipped milestone — the collision target that
+    // findPhaseInternal reaches via the .planning/milestones/<v>-phases/ search.
+    fs.mkdirSync(
+      path.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', 'PROJECT_V2-02-archived-phase'),
+      { recursive: true }
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', 'PROJECT_V2-02-archived-phase', '02-CONTEXT.md'),
+      '# Archived\n'
+    );
+
+    // Active phase 07 — the phase actually being committed.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', 'PROJECT_V2-07-active-phase'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Phase 7: Active Phase\nGoal: ship it\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'phases', 'PROJECT_V2-07-active-phase', '07-CONTEXT.md'),
+      '# Context\n'
+    );
+
+    const result = runGsdTools(
+      'commit "docs(07): add context" --files .planning/phases/PROJECT_V2-07-active-phase/07-CONTEXT.md',
+      tmpDir
+    );
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.committed, true, 'should have committed');
+
+    // The commit must land on the phase-07 branch. Pre-fix this resolved the
+    // `2-` in `PROJECT_V2-` and silently switched onto the archived phase-02
+    // branch instead.
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
+    assert.strictEqual(
+      branch,
+      'gsd/phase-07-active-phase',
+      `should be on the active phase-07 branch, not the archived phase-02 branch (got ${branch})`
+    );
+
+    // The committed file must exist on the phase-07 branch's HEAD, proving the
+    // commit did not silently land on the wrong branch.
+    const committedFile = execFileSync(
+      'git',
+      ['show', 'HEAD:.planning/phases/PROJECT_V2-07-active-phase/07-CONTEXT.md'],
+      { cwd: tmpDir, encoding: 'utf-8' }
+    );
+    assert.ok(committedFile.includes('# Context'), 'phase-07 file must be in the commit');
+  });
+
+  // #2539 second defect: an auto-checkout mid-commit must never be silent. The
+  // #1278 intent was to CREATE the phase branch before the FIRST commit on it —
+  // not to force-switch an already-checked-out working branch onto a different
+  // existing branch. If the resolved phase branch already exists and the working
+  // tree is on some other branch, switching to it silently is the dangerous
+  // drift; the fix keeps create-if-absent but drops the silent switch-to-existing.
+  test('#2539: does not silently switch onto an existing unrelated phase branch', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        commit_docs: true,
+        branching_strategy: 'phase',
+        phase_branch_template: 'gsd/phase-{phase}-{slug}',
+      })
+    );
+    // Active phase 01.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '01-first-phase'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Phase 1: First Phase\nGoal: start\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'phases', '01-first-phase', '01-CONTEXT.md'),
+      '# Context\n'
+    );
+
+    // Pre-create the phase-01 branch and check it out, then return to the
+    // default branch so the working tree is NOT on the phase branch when commit
+    // runs. The resolved branch already exists; the pre-fix code silently
+    // switched onto it.
+    execFileSync('git', ['branch', 'gsd/phase-01-first-phase'], { cwd: tmpDir, stdio: 'pipe' });
+    // Ensure the file is staged only by the commit command itself (it must run
+    // from the current/default branch and must not be force-switched).
+    const beforeBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: tmpDir, encoding: 'utf-8',
+    }).trim();
+
+    // Invoke gsd-tools via spawnSync so stderr is observable on the success
+    // path — the warning that proves the no-switch path is not silent (#2539
+    // AC2) is written to stderr, which execFileSync discards on success.
+    const { TOOLS_PATH } = require('./helpers.cjs');
+    const { spawnSync } = require('child_process');
+    const proc = spawnSync(process.execPath, [
+      TOOLS_PATH, 'commit', 'docs(01): add context',
+      '--files', '.planning/phases/01-first-phase/01-CONTEXT.md',
+    ], { cwd: tmpDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const stdout = proc.stdout || '';
+    const stderr = proc.stderr || '';
+    if (proc.status !== 0) {
+      throw new Error(`gsd-tools commit exited ${proc.status}: stdout=${stdout} stderr=${stderr}`);
+    }
+
+    const output = JSON.parse(stdout.trim());
+    assert.strictEqual(output.committed, true, 'should have committed');
+
+    // The command must NOT have silently switched the working tree onto the
+    // pre-existing phase branch. The commit lands on the branch we were on.
+    const afterBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: tmpDir, encoding: 'utf-8',
+    }).trim();
+    assert.strictEqual(
+      afterBranch,
+      beforeBranch,
+      `must not silently switch onto an existing phase branch mid-commit (was ${beforeBranch}, now ${afterBranch})`
+    );
+
+    // #2539 AC2: the no-switch path must not be silent either. The warning
+    // surfaces the resolved branch and the branch the commit actually lands on.
+    assert.ok(
+      /Warning: resolved phase branch .* already exists/.test(stderr),
+      `expected a non-silent warning on stderr when the resolved branch already exists; got stderr=${stderr}`
+    );
   });
 });
 
@@ -3613,5 +3761,80 @@ describe('#2279: map-codebase date stamp instructions overwrite existing dates',
     const idx = content.indexOf('overwriting any existing date');
     assert.notEqual(idx, -1,
       'workflow must instruct agents to overwrite existing dates, not just replace [YYYY-MM-DD] placeholders');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEFECT.GENERATIVE-FIX parity guard: HOST_COMMAND_ROUTERS vs TOP_LEVEL_USAGE
+// vs SKIP_ROOT_RESOLUTION (#2928 S9)
+//
+// gsd-tools.cjs's query-command surface is declared across THREE
+// independently hand-maintained sites in the same file with no prior parity
+// gate between them: the dispatch table (HOST_COMMAND_ROUTERS), the
+// `--help` command list (TOP_LEVEL_USAGE), and the project-root-skip list
+// (SKIP_ROOT_RESOLUTION). Nothing previously caught a command being wired
+// into the dispatch table but omitted from the help string (or vice versa)
+// — exactly the generative-fix-divergence shape CLAUDE.md's
+// "Generative Fix Divergence" anti-pattern names ("add a parity assertion
+// test that fails if the shared constants/arrays/parsers diverge").
+//
+// This is a STRUCTURAL comparison against the exported constants, not a
+// source-text/string-match test, so it stays correct across reformatting
+// and is immune to the no-source-grep concern.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('gsd-tools.cjs dispatch/help/skip-list parity (DEFECT.GENERATIVE-FIX, #2928 S9)', () => {
+  const { HOST_COMMAND_ROUTERS, TOP_LEVEL_USAGE, skipsRootResolution } = require('../gsd-core/bin/gsd-tools.cjs');
+
+  // Parse the "Commands: a, b, c\n\nGlobal flags:" line out of the usage
+  // string rather than hardcoding a copy of it here — this test must fail
+  // when the two sites diverge, not silently pass because it re-embeds its
+  // own stale expectation.
+  function parseHelpCommandNames(usage) {
+    const match = usage.match(/Commands: ([\s\S]*?)\n\nGlobal flags:/);
+    assert.ok(match, 'TOP_LEVEL_USAGE must contain a "Commands: ...\\n\\nGlobal flags:" block');
+    return match[1]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  test('every HOST_COMMAND_ROUTERS entry is listed in the --help command string', () => {
+    const helpNames = new Set(parseHelpCommandNames(TOP_LEVEL_USAGE));
+    const missing = Object.keys(HOST_COMMAND_ROUTERS).filter((name) => !helpNames.has(name));
+    assert.deepEqual(
+      missing,
+      [],
+      `command(s) registered in HOST_COMMAND_ROUTERS but missing from TOP_LEVEL_USAGE's ` +
+      `"Commands:" list: ${missing.join(', ')}`,
+    );
+  });
+
+  test('context-predicates is registered in all three hand-maintained sites', () => {
+    // Concrete regression pin for the command this parity test was added
+    // alongside (#2928 S9) — a generic diff-based assertion alone would not
+    // fail if ALL THREE sites were missing an entry simultaneously.
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(HOST_COMMAND_ROUTERS, 'context-predicates'),
+      'context-predicates must be registered in HOST_COMMAND_ROUTERS',
+    );
+    assert.ok(
+      parseHelpCommandNames(TOP_LEVEL_USAGE).includes('context-predicates'),
+      'context-predicates must be listed in TOP_LEVEL_USAGE',
+    );
+    assert.ok(
+      skipsRootResolution('context-predicates'),
+      'context-predicates must be in SKIP_ROOT_RESOLUTION (it is a pure repo-root CONTEXT.md ' +
+      'read, like prompt-budget, and must work with no .planning/ directory present)',
+    );
+  });
+
+  test('SKIP_ROOT_RESOLUTION is not exported as a mutable live Set (DEFECT.MUTABLE-EXPORTED-SET, #2928)', () => {
+    const gsdTools = require('../gsd-core/bin/gsd-tools.cjs');
+    assert.equal(
+      gsdTools.SKIP_ROOT_RESOLUTION,
+      undefined,
+      'the live Set must not be exported directly — only the read-only skipsRootResolution() predicate',
+    );
+    assert.equal(typeof gsdTools.skipsRootResolution, 'function');
   });
 });

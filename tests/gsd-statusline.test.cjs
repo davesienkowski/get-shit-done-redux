@@ -18,10 +18,11 @@ const path = require('node:path');
 const {
   parseStateMd,
   formatGsdState,
+  formatGsdStateCompact,
   readGsdState,
   isInstalledAheadOfLatest,
 } = require('../hooks/gsd-statusline.js');
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, saveSessionEnv, restoreSessionEnv, clearSessionEnv } = require('./helpers.cjs');
 
 // ─── parseStateMd ───────────────────────────────────────────────────────────
 
@@ -146,6 +147,131 @@ describe('parseStateMd', () => {
     assert.equal(s.nextAction, 'execute');
     assert.deepEqual(s.nextPhases, ['4.5', '4.6']);
   });
+
+  // #2754 — the frontmatter fence regex and downstream splits used literal \n,
+  // so a CRLF STATE.md dropped the ENTIRE frontmatter block (every field absent).
+  // The invariant is CRLF/LF parity — parseStateMd must yield the same state for
+  // the same content regardless of line endings, matching the canonical
+  // extractFrontmatter parser (src/frontmatter.cts), which is CRLF-safe.
+  const crlf = (lfContent) => lfContent.replace(/\n/g, '\r\n');
+
+  test('parses full YAML frontmatter identically under CRLF (#2754)', () => {
+    const lf = [
+      '---',
+      'status: executing',
+      'milestone: v1.9',
+      'milestone_name: Code Quality',
+      'active_phase: 4',
+      'next_action: execute',
+      '---',
+      '',
+      '# State',
+      'Phase: 1 of 5 (fix-graphiti-deployment)',
+    ].join('\n');
+
+    const lfState = parseStateMd(lf);
+    const crlfState = parseStateMd(crlf(lf));
+    assert.deepStrictEqual(crlfState, lfState,
+      'CRLF STATE.md must parse identically to LF — pre-fix the entire frontmatter block was dropped (#2754)');
+    // pin the specific fields the issue names so a vacuous deepEqual({},{}) can't pass:
+    assert.equal(crlfState.status, 'executing');
+    assert.equal(crlfState.milestone, 'v1.9');
+    assert.equal(crlfState.milestoneName, 'Code Quality');
+    assert.equal(crlfState.activePhase, '4');
+    assert.equal(crlfState.nextAction, 'execute');
+    assert.equal(crlfState.phaseNum, '1');
+    assert.equal(crlfState.phaseTotal, '5');
+  });
+
+  test('parses next_phases flow-array form identically under CRLF (#2754)', () => {
+    const lf = [
+      '---',
+      'next_phases: [4.5, 4.6]',
+      '---',
+    ].join('\n');
+
+    assert.deepStrictEqual(parseStateMd(crlf(lf)), parseStateMd(lf));
+    assert.deepEqual(parseStateMd(crlf(lf)).nextPhases, ['4.5', '4.6']);
+  });
+
+  test('parses next_phases block-list form identically under CRLF (#2754)', () => {
+    const lf = [
+      '---',
+      'next_phases:',
+      '  - 4.5',
+      '  - 4.6',
+      '---',
+    ].join('\n');
+
+    assert.deepStrictEqual(parseStateMd(crlf(lf)).nextPhases, parseStateMd(lf).nextPhases,
+      'block-list regex used a literal \\n — CRLF must still parse the list');
+    assert.deepEqual(parseStateMd(crlf(lf)).nextPhases, ['4.5', '4.6']);
+  });
+
+  test('parses the progress nested block identically under CRLF (#2754)', () => {
+    const lf = [
+      '---',
+      'progress:',
+      '  completed_phases: 3',
+      '  total_phases: 5',
+      '  percent: 60',
+      '---',
+    ].join('\n');
+
+    assert.deepStrictEqual(parseStateMd(crlf(lf)), parseStateMd(lf),
+      'progress block regex used a literal \\n — CRLF must still parse completed/total/percent');
+    assert.equal(parseStateMd(crlf(lf)).completedPhases, '3');
+    assert.equal(parseStateMd(crlf(lf)).totalPhases, '5');
+    assert.equal(parseStateMd(crlf(lf)).percent, '60');
+  });
+
+  test('treats literal "null" values as null identically under CRLF (#2754)', () => {
+    const lf = [
+      '---',
+      'status: null',
+      'milestone: null',
+      'milestone_name: null',
+      '---',
+    ].join('\n');
+
+    assert.deepStrictEqual(parseStateMd(crlf(lf)), parseStateMd(lf));
+    assert.equal(parseStateMd(crlf(lf)).status, null);
+    assert.equal(parseStateMd(crlf(lf)).milestone, null);
+  });
+
+  // #2754 (Generative-Fix Divergence guard, CLAUDE.md "parallel surfaces sharing a
+  // parser"): parseStateMd and the canonical extractFrontmatter both derive GSD
+  // state from the same STATE.md frontmatter, and they diverged once already (this
+  // very CRLF bug). Pin the overlap so a future divergence on a scalar shape or
+  // line ending is caught here, not in a live Windows report.
+  const { extractFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
+
+  test('parseStateMd frontmatter-derived fields agree with extractFrontmatter (LF + CRLF, #2754)', () => {
+    const lf = [
+      '---',
+      'status: executing',
+      'milestone: v1.9',
+      'milestone_name: Code Quality',
+      'active_phase: 4',
+      'next_action: execute',
+      '---',
+      '',
+      '# State',
+      'Phase: 1 of 5 (fix-graphiti-deployment)',
+    ].join('\n');
+
+    for (const [label, content] of [['LF', lf], ['CRLF', crlf(lf)]]) {
+      const fm = extractFrontmatter(content);
+      const st = parseStateMd(content);
+      // extractFrontmatter yields the raw frontmatter object; parseStateMd projects
+      // a subset onto its own keys. Assert the projection matches the raw values.
+      assert.equal(st.status, fm.status, `status mismatch (${label})`);
+      assert.equal(st.milestone, fm.milestone, `milestone mismatch (${label})`);
+      assert.equal(st.milestoneName, fm.milestone_name, `milestone_name mismatch (${label})`);
+      assert.equal(st.activePhase, String(fm.active_phase), `active_phase mismatch (${label})`);
+      assert.equal(st.nextAction, fm.next_action, `next_action mismatch (${label})`);
+    }
+  });
 });
 
 // ─── formatGsdState ─────────────────────────────────────────────────────────
@@ -221,6 +347,16 @@ describe('formatGsdState', () => {
   test('returns only available parts when everything else is missing', () => {
     assert.equal(formatGsdState({ status: 'planning' }), 'planning');
   });
+
+  test('renders observable "no active workstream" signal for the #2850 sentinel', () => {
+    assert.equal(formatGsdState({ noActiveWorkstream: true }), 'no active workstream');
+  });
+});
+
+describe('formatGsdStateCompact — #2850 sentinel', () => {
+  test('renders observable "no active workstream" signal', () => {
+    assert.equal(formatGsdStateCompact({ noActiveWorkstream: true }), 'no active workstream');
+  });
 });
 
 describe('isInstalledAheadOfLatest', () => {
@@ -284,6 +420,189 @@ describe('readGsdState', () => {
     // Empty file yields an empty state object, not null — the function
     // only returns null when no file is found.
     assert.deepEqual(s, {});
+  });
+
+  // ─── Workstream mode (#2850) ──────────────────────────────────────────────
+  //
+  // readGsdState previously only ever walked up looking for a flat
+  // .planning/STATE.md — it never resolved an active workstream, so the
+  // GSD-state segment silently disappeared for any workstream-mode project
+  // without a root STATE.md (issue #2850). These cases exercise the fix,
+  // which reuses resolveActiveWorkstream (CLI>env>store precedence,
+  // active-workstream-store.cjs) and listAvailableWorkstreams/planningPaths
+  // (planning-workspace.cjs) rather than re-implementing that resolution.
+  //
+  // saveSessionEnv/restoreSessionEnv/clearSessionEnv come from tests/helpers.cjs
+  // (shared with tests/active-workstream-store.unit.test.cjs — see that file's
+  // comment; #2850 code review caught the two local copies had diverged).
+
+  test('resolves active workstream via GSD_WORKSTREAM env when no root STATE.md exists (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'bot'), { recursive: true });
+    fs.writeFileSync(
+      path.join(proj, '.planning', 'workstreams', 'bot', 'STATE.md'),
+      '---\nstatus: executing\nmilestone: v1.0\n---\n'
+    );
+
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    t.after(() => restoreSessionEnv(saved));
+    process.env.GSD_WORKSTREAM = 'bot';
+
+    const s = readGsdState(proj);
+    assert.notEqual(s, null, 'must not silently return null when a workstream resolves');
+    assert.equal(s.status, 'executing');
+    assert.equal(s.milestone, 'v1.0');
+  });
+
+  test('resolves via GSD_WORKSTREAM env with CRLF frontmatter (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'bot'), { recursive: true });
+    fs.writeFileSync(
+      path.join(proj, '.planning', 'workstreams', 'bot', 'STATE.md'),
+      '---\r\nstatus: planning\r\nmilestone: v2.0\r\n---\r\n'
+    );
+
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    t.after(() => restoreSessionEnv(saved));
+    process.env.GSD_WORKSTREAM = 'bot';
+
+    const s = readGsdState(proj);
+    assert.equal(s.status, 'planning');
+    assert.equal(s.milestone, 'v2.0');
+  });
+
+  test('flat root STATE.md takes precedence over workstream mode when both exist (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'bot'), { recursive: true });
+    fs.writeFileSync(
+      path.join(proj, '.planning', 'STATE.md'),
+      '---\nstatus: executing\nmilestone: v-flat\n---\n'
+    );
+    fs.writeFileSync(
+      path.join(proj, '.planning', 'workstreams', 'bot', 'STATE.md'),
+      '---\nstatus: planning\nmilestone: v-ws\n---\n'
+    );
+
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    t.after(() => restoreSessionEnv(saved));
+    process.env.GSD_WORKSTREAM = 'bot';
+
+    const s = readGsdState(proj);
+    assert.equal(s.milestone, 'v-flat', 'flat STATE.md must win — flat-mode behavior stays byte-for-byte unchanged');
+  });
+
+  test('returns an observable "no active workstream" signal when nothing resolves (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'other'), { recursive: true });
+
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    t.after(() => restoreSessionEnv(saved));
+
+    const s = readGsdState(proj);
+    assert.deepEqual(s, { noActiveWorkstream: true });
+  });
+
+  test('resolved workstream with no STATE.md yet degrades to null without crashing (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'bot'), { recursive: true });
+    // No STATE.md written under workstreams/bot/ — workstream exists, state doesn't yet.
+
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    t.after(() => restoreSessionEnv(saved));
+    process.env.GSD_WORKSTREAM = 'bot';
+
+    assert.equal(readGsdState(proj), null);
+  });
+
+  test('resolves active workstream via the stored shared pointer file (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'bot'), { recursive: true });
+    fs.writeFileSync(
+      path.join(proj, '.planning', 'workstreams', 'bot', 'STATE.md'),
+      '---\nstatus: verifying\nmilestone: v3.0\n---\n'
+    );
+    fs.writeFileSync(path.join(proj, '.planning', 'active-workstream'), 'bot\n');
+
+    const { _resetControllingTtyCacheForTests } = require('../gsd-core/bin/lib/active-workstream-store.cjs');
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    _resetControllingTtyCacheForTests();
+    t.after(() => {
+      restoreSessionEnv(saved);
+      _resetControllingTtyCacheForTests();
+    });
+
+    const s = readGsdState(proj);
+    assert.equal(s.status, 'verifying');
+    assert.equal(s.milestone, 'v3.0');
+  });
+
+  test('whitespace-only stored pointer file is treated as no active workstream (#2850)', (t) => {
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'bot'), { recursive: true });
+    fs.writeFileSync(path.join(proj, '.planning', 'active-workstream'), '   \n');
+
+    const { _resetControllingTtyCacheForTests } = require('../gsd-core/bin/lib/active-workstream-store.cjs');
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    _resetControllingTtyCacheForTests();
+    t.after(() => {
+      restoreSessionEnv(saved);
+      _resetControllingTtyCacheForTests();
+    });
+
+    assert.deepEqual(readGsdState(proj), { noActiveWorkstream: true });
+  });
+
+  test('stored pointer naming an absent workstream dir degrades to the sentinel WITHOUT deleting the pointer file (#2850)', (t) => {
+    // Regression for a review finding: readGsdState previously resolved via
+    // resolveActiveWorkstream's DEFAULT store lookup (getActiveWorkstream),
+    // which self-heals a stale pointer by deleting it (adapter.clear() in
+    // active-workstream-store.cts). The statusline renders once per prompt,
+    // so a merely-stale pointer (mid-rename, mid-cleanup, or any transient
+    // absence of the workstream dir) would be silently unlinked by a hook
+    // whose only job is to display text — violating issue #2850's AC4 ("the
+    // fix is purely additive to what's displayed"). The fix routes through
+    // peekActiveWorkstream, a read-only sibling that never calls clear().
+    // This test asserts BOTH halves: the render still degrades usefully,
+    // AND the pointer file survives the render untouched.
+    const proj = fs.mkdtempSync(path.join(tmpRoot, 'proj-'));
+    // workstream mode is detected via .planning/workstreams/ existing — but
+    // note it does NOT contain a 'ghost' directory, so the pointer below
+    // names a workstream that does not exist.
+    fs.mkdirSync(path.join(proj, '.planning', 'workstreams', 'other'), { recursive: true });
+    const pointerPath = path.join(proj, '.planning', 'active-workstream');
+    fs.writeFileSync(pointerPath, 'ghost\n');
+
+    const { _resetControllingTtyCacheForTests } = require('../gsd-core/bin/lib/active-workstream-store.cjs');
+    const saved = saveSessionEnv();
+    clearSessionEnv();
+    _resetControllingTtyCacheForTests();
+    t.after(() => {
+      restoreSessionEnv(saved);
+      _resetControllingTtyCacheForTests();
+    });
+
+    assert.equal(fs.existsSync(pointerPath), true, 'precondition: pointer file must exist before the render');
+
+    const s = readGsdState(proj);
+
+    assert.deepEqual(s, { noActiveWorkstream: true }, 'a stale pointer must still degrade to the observable sentinel');
+    assert.equal(
+      fs.existsSync(pointerPath),
+      true,
+      'a read-only render must never delete the pointer file — that is a write, and the statusline must be purely additive to what is displayed (#2850 AC4)'
+    );
+    assert.equal(
+      fs.readFileSync(pointerPath, 'utf8'),
+      'ghost\n',
+      'the pointer file content must be byte-for-byte unchanged by the render, not just present'
+    );
   });
 });
 

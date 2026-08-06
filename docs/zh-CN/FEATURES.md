@@ -1173,9 +1173,9 @@ GSD update available: 1.39.0 → 1.40.0. Run /gsd-update.
 
 ### 42. 跨 AI 同行评审
 
-**命令：** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--ollama] [--lm-studio] [--llama-cpp] [--all]`
+**命令：** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--agy] [--antigravity] [--ollama] [--lm-studio] [--llama-cpp] [--kimi-code] [--all]`
 
-**目的：** 调用外部 AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity）独立审查阶段计划。生成包含每位审查者反馈的结构化 REVIEWS.md。
+**目的：** 调用外部 AI CLI（Gemini、Claude、Codex、CodeRabbit、OpenCode、Qwen Code、Cursor、Antigravity、Kimi Code）和本地 OpenAI 兼容服务器（Ollama、LM Studio、llama.cpp）独立审查阶段计划。生成包含每位审查者反馈的结构化 REVIEWS.md。
 
 **需求：**
 - REQ-REVIEW-01：系统必须检测系统上可用的 AI CLI
@@ -2821,7 +2821,7 @@ Source commit: abc1234 (3 commits behind HEAD)
 - 执行器安装失败会暂停进行人工验证，而不是自动尝试类似命名的包。
 
 **需求：**
-- REQ-PKG-GATE-01：研究必须记录包注册表、年龄、下载/来源信号、slopcheck 判决和处置。
+- REQ-PKG-GATE-01：研究必须记录包注册表、年龄、下载/来源信号、合法性判决和处置。
 - REQ-PKG-GATE-02：规划器必须在执行前门控未验证或可疑的包安装。
 - REQ-PKG-GATE-03：执行器在包管理器安装失败后不得自动替换包名。
 
