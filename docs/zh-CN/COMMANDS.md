@@ -185,7 +185,7 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 - 加 `--view`：将现有 RESEARCH.md 打印到标准输出，不生成新报告。RESEARCH.md 不存在时报错。
 
 **包合法性检查门（v1.42.1）：**
-当研究者推荐外部包时，会对每个包运行 `slopcheck install <pkg> --json` 并在 RESEARCH.md 中写入 `## Package Legitimacy Audit` 表格，记录注册表、年龄、下载量、源码仓库和 slopcheck 裁决。裁决结果：
+当研究者推荐外部包时，会对每个包运行 `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` 并在 RESEARCH.md 中写入 `## Package Legitimacy Audit` 表格，记录注册表、年龄、下载量、源码仓库和合法性裁决。裁决结果：
 
 - `[SLOP]` — 包从 RESEARCH.md 中完全移除，永远不会进入规划器
 - `[SUS]` — 包被标记；规划器在安装任务前插入 `checkpoint:human-verify`
@@ -218,7 +218,7 @@ v1.40 中，六个命名空间路由器作为第一阶段入口点随附发布�
 | 参数 / 标志 | 必填 | 描述 |
 |-----------------|----------|-------------|
 | `N` | **是** | 要规划和审查的阶段编号 |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | 否 | 单一审查者选择 |
+| 审查者标志 | 否 | 原样传递所有审查者通道标志：`--gemini`、`--claude`、`--codex`、`--coderabbit`、`--opencode`、`--qwen`、`--cursor`、`--agy` / `--antigravity`、`--ollama`、`--lm-studio`、`--llama-cpp`、`--kimi-code` |
 | `--all` | 否 | 并行运行所有已配置的审查者 |
 | `--max-cycles N` | 否 | 覆盖循环上限（默认 3） |
 
@@ -1244,6 +1244,7 @@ node gsd-tools.cjs intel api-surface              # 渲染 api-map.json → API-
 | `--qwen` | 包含 Qwen Code 审查（阿里巴巴 Qwen 模型） |
 | `--cursor` | 包含 Cursor 代理审查 |
 | `--agy` / `--antigravity` | 包含 Antigravity CLI 审查（使用 Google 凭证免费） |
+| `--kimi-code` | 包含 Kimi Code CLI 审查（Moonshot AI） |
 | `--ollama` | 包含 Ollama 服务器审查 |
 | `--lm-studio` | 包含 LM Studio 服务器审查 |
 | `--llama-cpp` | 包含 llama.cpp 服务器审查 |

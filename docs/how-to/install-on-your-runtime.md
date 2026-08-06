@@ -125,6 +125,12 @@ The installer writes four surfaces under `~/.config/opencode/` (XDG) or `~/.open
 
 **GSD safety hooks on OpenCode.** OpenCode does not register lifecycle hooks the way Claude Code does (its `hooksSurface` is `none`), so GSD's prompt-injection guard, read-before-edit guard, injection scanner, and context monitor would otherwise be inert. The bundled plugin (`plugins/gsd-core.js`) closes that gap: OpenCode auto-discovers `plugins/*.{ts,js}` files under its config directory at startup and the adapter bridges OpenCode's event bus (`tool.execute.before`/`after`, `session.created`, `file.edited`) onto GSD's existing hook scripts, spawning them as subprocesses. No `opencode.json` entry is needed — the plugin is loaded by directory auto-discovery (the config `plugin` array is for npm packages only). A blocking hook aborts the tool call; an advisory hook surfaces its message without blocking.
 
+**Your plugin directory is pinned to CommonJS (accepted trade-off, #2544).** GSD's adapter is a CommonJS `.js` file, and Node decides a `.js` file's module type by walking up for the nearest `package.json`. So the installer writes a minimal `{"type":"commonjs"}` marker into the plugin directory itself — `plugins/package.json` on OpenCode and Kilo, `extensions/package.json` on pi. It is written only when GSD actually stages its adapter there, it never overwrites a `package.json` GSD did not write, and uninstall removes only its own.
+
+The trade-off: that marker shadows your config root for **every** `.js` file in that directory, not just GSD's. If you author your own plugins as ESM `.js` and rely on a `"type": "module"` at the config root, they will stop resolving as ESM. This is deliberate — it is strictly narrower than the pre-#2544 behavior, which wrote the marker over `<configRoot>/package.json` itself and destroyed whatever was there — but it is a real constraint rather than a pure improvement, which is why it is stated here.
+
+**Mitigation:** author your own plugins as `.ts`. OpenCode and Kilo compile plugin TypeScript with Bun, and a `package.json` `type` field does not affect `.ts` resolution — so a `.ts` plugin is unaffected by the marker. Failing that, keep ESM plugins outside the auto-discovered directory and load them as npm packages via the config `plugin` array.
+
 **Override the install directory:**
 
 ```bash
@@ -276,7 +282,7 @@ COPILOT_CONFIG_DIR=~/.copilot-alt npx @opengsd/gsd-core@latest --copilot --globa
 npx @opengsd/gsd-core@latest --cursor --global
 ```
 
-Artifacts land in `~/.cursor/`. GSD installs slash commands (`~/.cursor/commands/gsd-*.md`), skills (`~/.cursor/skills/gsd-*/SKILL.md`), agents, and rule references. Each GSD action appears once in Cursor's `/` menu: the command surface is the single `/` entry point, and the skills are installed with `user-invocable: false` so they stay model-invocable background knowledge without duplicating the `/` entries.
+Artifacts land in `~/.cursor/`. GSD installs skills (`~/.cursor/skills/gsd-*/SKILL.md`), agents, and rule references. Cursor exposes each skill once in the `/` menu while keeping it available for contextual model invocation. Upgrading removes manifest-managed legacy `~/.cursor/commands/gsd-*.md` copies that previously duplicated those menu entries; unknown user-authored command files are preserved.
 
 **Override the install directory:**
 
@@ -457,7 +463,7 @@ npx @opengsd/gsd-core@latest --zcode --global
 
 ZCode's skill format is identical to Claude Code's, so no runtime-specific converter is required — GSD lands as a pure declarative descriptor with no hardcoded installer branches. ZCode also natively imports skills and MCP config from `~/.claude`; if you install GSD for **both** Claude and ZCode, you may see duplicate GSD skills inside ZCode, which is expected. To connect ZCode's MCP servers to GSD's companion server, see [how to connect the GSD MCP server](connect-gsd-mcp-server.md).
 
-GSD's hook-automation and native-MCP-registration integrations are not yet wired for ZCode — both are blocked on ZCode not yet publishing the on-disk config format for its plugin `Hook` component or the settings filename/schema for its MCP store. See the [`## zcode`](host-integration-capability-matrix.md#zcode) section of the host-integration capability matrix for the cited source URLs.
+GSD's hook-automation and native-MCP-registration integrations are not yet wired for ZCode — both are blocked on ZCode not yet publishing the on-disk config format for its plugin `Hook` component or the settings filename/schema for its MCP store. See the [`## zcode`](../reference/host-integration-capability-matrix.md#zcode) section of the host-integration capability matrix for the cited source URLs.
 
 ---
 
@@ -473,7 +479,7 @@ npx @opengsd/gsd-core@latest --pi --global
 
 The `.js` suffix is load-bearing: pi auto-discovers extensions by scanning that directory and keeping only names ending in `.ts` or `.js`, and it skips anything else **silently** — no error, no log line. GSD shipped the file as `gsd.cjs` through 1.7.0, which pi therefore never loaded, so `/gsd` never appeared ([#2470](https://github.com/open-gsd/gsd-core/issues/2470)). Upgrading removes the stale `gsd.cjs`; if you had added a manual `extensions` entry in `~/.pi/agent/settings.json` as a workaround, you can drop it.
 
-The extension registers a `/gsd` command and a `gsd_invoke` tool that dispatch GSD commands via a bounded subprocess call to `gsd-core/bin/gsd-tools.cjs` (no fully-populated in-process command-routing hub exists — see the matrix's Stage 2 note). This is a **plugin-only install**: pi has no shared-settings hook surface (`hooksSurface: none`) and, unlike Claude/OpenCode/Kilo, no host-read markdown surface at all — pi's `/gsd` command is registered programmatically by the extension, not discovered from files, so GSD installs the extension plus its universal `gsd-core/` engine payload and the shared `hooks/`/`hooks/lib/` bundle (spawned by the extension itself, not by any config-file hook bus), and does **not** write any `commands/`, `agents/`, or `skills/` directory for pi. The extension bridges GSD's `session_start`/`before_agent_start`/`session_before_compact`/`tool_call` lifecycle events to those staged `hooks/` scripts as bounded, fail-open subprocesses, and steers pi's active model (`modelMode: active`) to a tier-resolved bare anthropic id via `pi.on('before_provider_request', ...)`. See the [`## pi`](host-integration-capability-matrix.md#pi) section of the host-integration capability matrix for the negotiated axes and citations.
+The extension registers a `/gsd` command and a `gsd_invoke` tool that dispatch GSD commands via a bounded subprocess call to `gsd-core/bin/gsd-tools.cjs` (no fully-populated in-process command-routing hub exists — see the matrix's Stage 2 note). This is a **plugin-only install**: pi has no shared-settings hook surface (`hooksSurface: none`) and, unlike Claude/OpenCode/Kilo, no host-read markdown surface at all — pi's `/gsd` command is registered programmatically by the extension, not discovered from files, so GSD installs the extension plus its universal `gsd-core/` engine payload and the shared `hooks/`/`hooks/lib/` bundle (spawned by the extension itself, not by any config-file hook bus), and does **not** write any `commands/`, `agents/`, or `skills/` directory for pi. The extension bridges GSD's `session_start`/`before_agent_start`/`session_before_compact`/`tool_call` lifecycle events to those staged `hooks/` scripts as bounded, fail-open subprocesses, and steers pi's active model (`modelMode: active`) to a tier-resolved bare anthropic id via `pi.on('before_provider_request', ...)`. See the [`## pi`](../reference/host-integration-capability-matrix.md#pi) section of the host-integration capability matrix for the negotiated axes and citations.
 
 ---
 

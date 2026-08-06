@@ -260,6 +260,39 @@ describe('CR-AGENT: code review agent frontmatter', () => {
     assert.ok(content.includes('files_reviewed_list'),
       'gsd-code-reviewer REVIEW.md frontmatter spec must include files_reviewed_list for --auto scope persistence');
   });
+
+  // #2825: gsd-code-fixer is the only writer that hand-rolls a git worktree; it
+  // must honor workflow.use_worktrees (the documented opt-out) like its four
+  // sibling writer workflows, and never rm -rf a possible Windows reparse point.
+  test('#2825 gsd-code-fixer.md reads workflow.use_worktrees and gates git worktree add on it', () => {
+    const content = fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.md'), 'utf-8');
+    assert.ok(
+      content.includes('workflow.use_worktrees'),
+      'gsd-code-fixer setup_worktree must read the workflow.use_worktrees config flag (#2825)',
+    );
+    // The git worktree add must be CONDITIONAL on the flag, not unconditional.
+    // Locate the worktree-add line and confirm a USE_WORKTREES gate precedes it.
+    assert.ok(
+      /USE_WORKTREES=.false./.test(content) || content.includes('if [ "$USE_WORKTREES" = "false" ]'),
+      'gsd-code-fixer must gate worktree creation on USE_WORKTREES=false (skip when opted out) (#2825)',
+    );
+  });
+
+  test('#2825 gsd-code-fixer.md forbids rm -rf on a possible reparse point (Windows junction safety)', () => {
+    const content = fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.md'), 'utf-8');
+    assert.ok(
+      /rm -rf.*reparse point|reparse point.*rm -rf|NEVER .rm -rf.|never use .rm -rf/i.test(content),
+      'gsd-code-fixer must forbid rm -rf on a possible reparse point/junction (#2825) — on Windows that is the delete-the-target path',
+    );
+  });
+
+  test('#2825 gsd-code-fixer.md records where verification ran (main checkout vs worktree)', () => {
+    const content = fs.readFileSync(path.join(AGENTS_DIR, 'gsd-code-fixer.md'), 'utf-8');
+    assert.ok(
+      /verification[\s\S]*(main checkout|worktree)|(main checkout|worktree)[\s\S]*verification/i.test(content),
+      'gsd-code-fixer REVIEW-FIX.md must record where verification ran (main checkout vs worktree) so a reader knows if the numbers are reproducible (#2825)',
+    );
+  });
 });
 
 // --- CR-CMD: code review command structure ---
@@ -498,7 +531,14 @@ describe('CR-INTEGRATION: workflow integration points', () => {
   test('quick.md resolves code-review capability hook', () => {
     const content = fs.readFileSync(path.join(WORKFLOWS_DIR, 'quick.md'), 'utf-8');
     const start = content.indexOf('**Step 6.25: Code review (auto)**');
-    const end = content.indexOf('**Step 6.5: Verification', start);
+    // #2994 (pre-existing since #2994's earlier quick-verification.md extraction,
+    // 18ff35d20): Step 6.5's content moved into
+    // gsd-core/workflows/quick/steps/quick-verification.md behind a
+    // `<!-- gsd:section id="quick-verification" -->` marker, so the literal
+    // "**Step 6.5: Verification" heading text no longer follows Step 6.25 in
+    // this file — the marker is the correct end-of-step delimiter now (mirrors
+    // phase6-review-capabilities.test.cjs's identical retarget for the same move).
+    const end = content.indexOf('<!-- gsd:section id="quick-verification"', start);
     assert.ok(start !== -1 && end !== -1, 'quick.md missing Step 6.25 code review section');
     const reviewContent = content.slice(start, end);
 

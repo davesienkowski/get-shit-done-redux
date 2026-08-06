@@ -216,6 +216,8 @@ Research, plan, and verify a phase.
 | `--tdd` | TDD mode — planner applies `type: tdd` to eligible behavior-adding tasks so each begins with a failing test. Composable with `--mvp`: `--mvp --tdd` produces vertical slices where every behavior-adding task starts red-green. The leading `tracer` task also starts red under `--tdd`. |
 | `--granularity <coarse\|standard\|fine>` | Override the planning granularity for this invocation, ignoring config. Valid values: `coarse`, `standard`, `fine`. Takes precedence over `granularities.planning`, top-level `granularity`, and `planning.granularity` config. |
 
+**Smart-zone estimate report (#2631).** Every generated PLAN.md carries an optional `estimate` block (`{tokens, tasks, confidence}`). During the plan-check pass, `gsd-plan-checker` runs each plan's `estimate.tokens` through `estimate-check` against the configurable `workflow.smart_zone_tokens` budget (default `100000`) and reports the result; a plan above budget gets a concrete split recommendation. The report is **advisory and never blocks planning**, and it is skipped with `--skip-verify` since it runs inside the verification pass. `confidence` is derived from how many completed phases carry recorded actuals — `low` means fewer than three, so the figure is not yet calibrated for your project. See [ADR-2629](adr/2629-phase-effort-estimation-calibration.md).
+
 **Prerequisites:** `.planning/ROADMAP.md` exists
 **Produces:** `{phase}-RESEARCH.md`, `{phase}-{N}-PLAN.md`, `{phase}-VALIDATION.md`; `{phase}/SKELETON.md` when Walking Skeleton mode fires
 
@@ -225,15 +227,18 @@ Research, plan, and verify a phase.
 - With `--view`: print existing RESEARCH.md to stdout, no spawn. Errors if RESEARCH.md missing.
 
 **Package Legitimacy Gate (v1.42.1):**
-When the researcher recommends external packages, it runs `slopcheck install <pkg> --json` on each one and writes a `## Package Legitimacy Audit` table to RESEARCH.md recording Registry, Age, Downloads, Source Repo, and slopcheck verdict. Verdicts:
+When the researcher recommends external packages, it runs `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` on each one and writes a `## Package Legitimacy Audit` table to RESEARCH.md recording Registry, Age, Downloads, Source Repo, and legitimacy verdict. Verdicts are computed from live registry APIs (npm, PyPI, crates.io):
 
 - `[SLOP]` — package removed from RESEARCH.md entirely; never reaches the planner
 - `[SUS]` — package flagged; planner inserts `checkpoint:human-verify` before the install task
 - `[OK]` — package approved; no checkpoint added
 
-Packages sourced from WebSearch are tagged `[ASSUMED]` (not `[VERIFIED]`) and treated the same as `[SUS]` — they get a human checkpoint before install. If `slopcheck` cannot be installed, every recommended package is tagged `[ASSUMED]` and gated.
+Packages sourced from WebSearch are tagged `[ASSUMED]` (not `[VERIFIED]`) and treated the same as `[SUS]` — they get a human checkpoint before install. A failed registry lookup degrades to `[SUS]` rather than throwing, so it is gated, not silently accepted. `slopcheck` is an optional escalate-only adapter that no shipped configuration wires; it is not required for the gate to function.
 
 See [Package Legitimacy Gate in the User Guide](USER-GUIDE.md#package-legitimacy-gate-v1421) for the full checkpoint format, verdict table, and troubleshooting.
+
+**In-repo value citation:**
+For any in-repo *discrete value* the researcher reports — an enum, a schema or type union, an error code, a status constant, or a filesystem path — a `[VERIFIED: …]` tag requires that it opened the source-of-truth file with `Read` during the run and cited the path **and line range** (`[VERIFIED: src/types/order.ts:14-22]`). The values are quoted verbatim in RESEARCH.md beside the claim, and any value used in a code example must also appear in that quote; anything else stays `[ASSUMED]`. A codebase `grep`, training memory, or a web search do not earn the tag on their own. This stops a plausible-but-drifted enum from reaching PLAN.md — where the planner lifts it into the plan's `<interfaces>` context block and the executor trusts it as ground truth — and surfacing only as a mid-execution deviation at typecheck.
 
 ```bash
 /gsd-plan-phase 1                              # Research + plan + verify phase 1
@@ -258,7 +263,7 @@ Cross-AI plan convergence loop — replan with review feedback until no HIGH con
 | Argument / Flag | Required | Description |
 |-----------------|----------|-------------|
 | `N` | **Yes** | Phase number to plan and review |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | No | Single-reviewer selection |
+| Reviewer flags | No | Pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | No | Run every configured reviewer in parallel |
 | `--max-cycles N` | No | Override cycle cap (default 3) |
 
@@ -449,6 +454,24 @@ Archive milestone, tag release.
 /gsd-complete-milestone
 ```
 
+**Pre-close artifact audit.** Before archiving, the workflow runs `gsd-tools audit-open` and reports every unresolved item across nine categories:
+
+| Category | Source | Open when |
+|----------|--------|-----------|
+| Debug sessions | `.planning/debug/` | status not `resolved` / `complete` |
+| Quick tasks | `.planning/quick/` | SUMMARY missing or not `complete` |
+| Threads | `.planning/threads/` | status not terminal |
+| Pending todos | `.planning/todos/pending/` | present |
+| Seeds | `.planning/seeds/` | not yet implemented |
+| UAT gaps | `*-UAT.md` | scenarios still pending |
+| Verification gaps | `*-VERIFICATION.md` | verdict `gaps_found` / `human_needed` |
+| CONTEXT questions | `*-CONTEXT.md` | questions left open |
+| **Deferred items** | `deferred-items.md` | entry lacks `status: resolved` |
+
+If any category is non-empty you are prompted with `[R] Resolve` / `[A] Acknowledge all` / `[C] Cancel`. `[A]` records the items to `STATE.md` under its own `## Deferred Items` heading and closes as `override_closeout`; an all-clear closes as `verified_closeout`.
+
+> **Note:** the `deferred-items.md` category is the per-phase SCOPE BOUNDARY log a phase agent writes when it finds a defect it should not fix. It is a different artifact from the `## Deferred Items` section `[A]` writes into `STATE.md`, which records what you acknowledged at close.
+
 ---
 
 ### `/gsd-milestone-summary`
@@ -623,7 +646,7 @@ Show status, next steps, and automatically advance to the next logical workflow 
 | `--next --auto` | Like `--next`, but chains steps automatically until milestone completion or a blocking decision |
 | `--next --converge` | When the next action is planning, route it through `/gsd-plan-review-convergence`; requires `workflow.plan_review_convergence=true` |
 | `--cross-ai` | Alias for `--converge` |
-| Reviewer flags | With `--converge`, pass through `--codex`, `--gemini`, `--claude`, `--opencode`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--all`, and `--max-cycles N` |
+| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
 | `--do "task description"` | Analyze freeform intent and dispatch to the most appropriate GSD command |
 | `--forensic` | Append a 6-check integrity audit after the standard report (STATE consistency, orphaned handoffs, deferred scope drift, memory-flagged pending work, blocking todos, uncommitted code) |
 
@@ -853,7 +876,7 @@ Run all remaining phases autonomously.
 | `--interactive` | Lean context with user input |
 | `--converge` | Route each planning step through `/gsd-plan-review-convergence`; requires `workflow.plan_review_convergence=true` |
 | `--cross-ai` | Alias for `--converge` |
-| Reviewer flags | With `--converge`, pass through `--codex`, `--gemini`, `--claude`, `--opencode`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--all`, and `--max-cycles N` |
+| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
 | `--text` | Replace `AskUserQuestion` prompts with plain numbered lists |
 
 ```bash
@@ -1350,6 +1373,20 @@ Update GSD with changelog preview, and optionally sync skills or reapply local p
 /gsd-update --next                  # Install from the @next RC dist-tag
 ```
 
+**Recovering your own files.** The update protects two different buckets, and
+they recover differently:
+
+| Bucket | What it holds | How it comes back |
+|---|---|---|
+| `gsd-local-patches/` | GSD-shipped files **you modified** | `/gsd-update --reapply` (three-way merge) |
+| `gsd-user-files-backup/` | Files **you added** inside GSD-managed directories | The update offers a restore before it finishes |
+
+When the backup is non-empty, the update lists what it saved, flags anything
+that may no longer be compatible with the release just installed, and asks
+whether to restore. Declining leaves the backup untouched — it is never
+deleted — so you can restore later with
+`gsd-tools restore-custom-files --config-dir <config-dir> --apply`.
+
 ---
 
 ## Code Quality Commands
@@ -1446,10 +1483,19 @@ Reviewers are prompted to verify the plan's claims against the actual repository
 | `--qwen` | Include Qwen Code review (Alibaba Qwen models) |
 | `--cursor` | Include Cursor agent review |
 | `--agy` / `--antigravity` | Include Antigravity CLI review (free with Google credentials) |
+| `--kimi-code` | Include Kimi Code CLI review (Moonshot AI) |
 | `--ollama` | Include Ollama server review |
 | `--lm-studio` | Include LM Studio server review |
 | `--llama-cpp` | Include llama.cpp server review |
 | `--all` | Include all available reviewers (CLI + local model servers) |
+
+**No `jq`, `curl`, or `timeout` prerequisite.** Reviewer lanes used to shell out to these for JSON parsing, HTTP calls, and wall-clock bounding, which made five lanes unavailable on a stock Windows/Git-Bash host (no `jq`) and left one lane unbounded on stock macOS (no `timeout` or `gtimeout`). GSD now does all three itself, so every lane runs with nothing on your `PATH` but the reviewer's own CLI. A lane that declares an external tool it genuinely needs still reports itself unavailable with an install hint rather than running into an empty review.
+
+**Unavailable reviewers:** an explicit reviewer flag is an assertion. If you name a reviewer that cannot run on this host — its CLI is not installed, a required external tool is missing, its local server is unreachable, or its egress destination changed (see below) — `/gsd-review` reports an **error** for that reviewer and does not proceed with a reduced set. This holds even when other named reviewers are available: `--gemini --qwen` on a host without `qwen` fails rather than silently becoming a Gemini-only review.
+
+Reviewers reached through `--all` or `review.default_reviewers` behave differently: an undetected reviewer there is reported as an info note and skipped. Use `--all` for "whatever is available on this host", and `review.default_reviewers` for a preferred subset that may vary by host.
+
+**Changed egress destination:** a reviewer lane is sent your plan text, requirements, research findings, and `CONTEXT.md` decisions. For the local-server lanes (`--ollama`, `--lm-studio`, `--llama-cpp`) the destination comes from a config key such as `review.ollama_host`, which is an ordinary editable value — including by a pull request. If you installed such a lane as a capability and its host has changed since you consented to it, GSD **blocks that lane and tells you both destinations** rather than sending your plans somewhere you did not approve. Re-consent to allow the new host. First-party lanes shipped with GSD are unaffected, and a lane you never consented to is not blocked — there is nothing to compare it against.
 
 **Default reviewer behavior (no flags):**
 - If `review.default_reviewers` is **unset**, `/gsd-review` runs all detected reviewers (current default behavior).
