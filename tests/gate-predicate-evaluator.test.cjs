@@ -131,6 +131,15 @@ describe('evaluatePredicate — command-exit-zero timeout', () => {
     assert.equal(shell.calls[0].timeoutMs, COMMAND_EXIT_ZERO_DEFAULT_TIMEOUT_MS);
   });
 
+  test('sub-millisecond timeout floors to >=1ms, never 0 (#46)', () => {
+    // 0.0004s * 1000 = 0.4 → Math.floor → 0. Pre-fix that 0 reaches spawnSync as the no-timeout
+    // sentinel (the ?? 30_000 seam default does not rescue 0), disabling the declared bound. The
+    // clamp must hand the seam a >=1ms value. Fails RED against the unfixed twin (captures 0).
+    const shell = fakeShell({ exitCode: 0 });
+    evaluatePredicate({ kind: 'command-exit-zero', command: 'true', timeout: 0.0004 }, baseCtx, { runBoundedShell: shell.run });
+    assert.equal(shell.calls[0].timeoutMs, 1, 'a positive sub-ms timeout must not floor to 0 (spawnSync no-timeout sentinel)');
+  });
+
   test('custom timeout (seconds) honored and converted to ms', () => {
     const shell = fakeShell({ exitCode: 0 });
     evaluatePredicate(

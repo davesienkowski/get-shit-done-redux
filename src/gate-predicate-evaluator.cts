@@ -117,7 +117,13 @@ function evaluateCommandExitZero(
     if (typeof rawTimeout !== 'number' || !Number.isFinite(rawTimeout) || rawTimeout <= 0) {
       throw new Error('command-exit-zero predicate "timeout" must be a positive finite number (seconds)');
     }
-    timeoutMs = Math.floor(rawTimeout * 1000);
+    // #46: clamp to a >=1ms floor. A positive but sub-millisecond timeout (0 < t < 0.001) otherwise
+    // floors to 0, and 0 is spawnSync's NO-timeout sentinel that the bounded-shell seam's
+    // `?? 30_000` default does not rescue (0 ?? 30_000 === 0) — so the declared execution bound is
+    // silently removed and the gate command runs unbounded, the "unbounded gate could hang the loop
+    // forever" failure ADR-2008 names the timeout exists to prevent. The whole-second paths and the
+    // throw-on-<=0/non-finite validation above are unchanged.
+    timeoutMs = Math.max(1, Math.floor(rawTimeout * 1000));
   }
 
   const interpolated = interpolate(command, ctx);
