@@ -28,6 +28,48 @@ const {
   EVALUATOR_KINDS,
 } = require('../gsd-core/bin/lib/gate-predicate-evaluator.cjs');
 
+// ─── artifact-frontmatter-equals: object/array equality is key-order-insensitive (issue #42) ──
+//
+// Regression for #42: an object-valued gate `equals` was compared with key-ORDER-SENSITIVE
+// JSON.stringify, so a deep-equal frontmatter mapping written in a different key order was
+// spuriously BLOCKED (fail-closed correctness defect). The fix sorts object keys recursively for
+// the object/array branch ONLY; the scalar String() coercion branch (property-tested in
+// gate-predicate-evaluator-missing.test.cjs) must stay unchanged, and ARRAY order stays
+// significant.
+
+describe('evaluatePredicate — artifact-frontmatter-equals object key-order (#42)', () => {
+  const objDeps = (frontmatterMeta) => ({
+    runBoundedShell: () => ({ exitCode: 0, stdout: '', stderr: '', signal: null, timedOut: false }),
+    findPhaseArtifact: () => '/x/STATUS.md',
+    readFrontmatter: () => ({ meta: frontmatterMeta }),
+  });
+  const pred = (equals) => ({ kind: 'artifact-frontmatter-equals', artifact: 'STATUS.md', field: 'meta', equals });
+
+  test('object equals matches a deep-equal mapping with different key order (block:false)', () => {
+    const res = evaluatePredicate(pred({ a: 1, b: 2 }), { cwd: '/x' }, objDeps({ b: 2, a: 1 }));
+    assert.equal(res.block, false, 'deep-equal object with reordered keys must match');
+  });
+
+  test('nested object equals is key-order-insensitive at every level', () => {
+    const res = evaluatePredicate(
+      pred({ outer: { x: 1, y: 2 }, z: 3 }),
+      { cwd: '/x' },
+      objDeps({ z: 3, outer: { y: 2, x: 1 } }),
+    );
+    assert.equal(res.block, false, 'nested reordered keys must match');
+  });
+
+  test('array element order remains significant (arrays are ordered)', () => {
+    const res = evaluatePredicate(pred([1, 2, 3]), { cwd: '/x' }, objDeps([3, 2, 1]));
+    assert.equal(res.block, true, 'a reordered array is NOT deep-equal');
+  });
+
+  test('a genuinely different object still blocks', () => {
+    const res = evaluatePredicate(pred({ a: 1, b: 2 }), { cwd: '/x' }, objDeps({ a: 1, b: 3 }));
+    assert.equal(res.block, true, 'differing values must still block');
+  });
+});
+
 // ─── Fake bounded-shell seam ──────────────────────────────────────────────────
 
 /** Build a fake runBoundedShell that records the invocation and returns a preset result. */
@@ -274,9 +316,10 @@ describe('evaluatePredicate — malformed predicate throws (maps to check-cmd fa
 // ─── contract surface ─────────────────────────────────────────────────────────
 
 describe('evaluatePredicate — exported contract surface', () => {
-  test('EVALUATOR_KINDS advertises command-exit-zero', () => {
+  test('EVALUATOR_KINDS advertises every built-in predicate kind', () => {
     assert.ok(Array.isArray(EVALUATOR_KINDS));
     assert.ok(EVALUATOR_KINDS.includes('command-exit-zero'));
+    assert.ok(EVALUATOR_KINDS.includes('artifact-frontmatter-equals'));
   });
 
   test('default timeout is 30s', () => {

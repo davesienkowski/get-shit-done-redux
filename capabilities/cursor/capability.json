@@ -1,9 +1,9 @@
 {
   "id": "cursor",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.9.1",
   "title": "Cursor",
-  "description": "Cursor IDE — skills + converted commands artifact layout; hooks.json surface; Claude hook event dialect; recursive skill loader (flat nesting); tier-2 support.",
+  "description": "Cursor IDE — skills-only workflow surface; hooks.json surface; Claude hook event dialect; recursive skill loader (flat nesting); tier-2 support.",
   "tier": "core",
   "requires": [],
   "engines": {
@@ -30,14 +30,6 @@
           "converter": "convertClaudeCommandToCursorSkill"
         },
         {
-          "kind": "commands",
-          "destSubpath": "commands",
-          "prefix": "gsd-",
-          "nesting": "flat",
-          "recursive": false,
-          "converter": "convertClaudeCommandToCursorCommand"
-        },
-        {
           "kind": "agents",
           "destSubpath": "agents",
           "prefix": "gsd-",
@@ -54,14 +46,6 @@
           "nesting": "flat",
           "recursive": true,
           "converter": "convertClaudeCommandToCursorSkill"
-        },
-        {
-          "kind": "commands",
-          "destSubpath": "commands",
-          "prefix": "gsd-",
-          "nesting": "flat",
-          "recursive": false,
-          "converter": "convertClaudeCommandToCursorCommand"
         },
         {
           "kind": "agents",
@@ -101,12 +85,19 @@
       "runtime": "node",
       "effortSurface": "undocumented"
     },
+    "harnessIsolationFlag": "--worktree",
     "hostBehaviors": {
       "reapplyCommand": "gsd-update --reapply (mention the skill name)",
       "frontmatterDialect": "cursor",
       "hooksJsonSurface": true,
       "skipSharedHooksInstall": true,
-      "reportCommandsDir": true,
+      "retiredArtifacts": [
+        {
+          "destSubpath": "commands",
+          "prefix": "gsd-",
+          "suffix": ".md"
+        }
+      ],
       "skipUpdateBannerCommand": true,
       "skipSettingsUi": true,
       "managedHookEvents": [
@@ -119,5 +110,40 @@
       ],
       "reviewerCli": true
     }
+  },
+  "reviewer": {
+    "slug": "cursor",
+    "flags": [
+      "--cursor"
+    ],
+    "transport": "spawn",
+    "probe": {
+      "kind": "command-exists",
+      "binary": "cursor-agent"
+    },
+    "invoke": {
+      "binary": "cursor-agent",
+      "args": [
+        "-p",
+        "--mode",
+        "ask",
+        "--trust",
+        "--output-format",
+        "text",
+        "{{prompt}}"
+      ],
+      "promptChannel": "argv-file-ref",
+      "outputChannel": "stdout",
+      "modelArg": null,
+      "effortChannel": "none"
+    },
+    "timeoutFloorMs": 900000,
+    "emptyOutput": "stub-with-stderr",
+    "reviewsSection": "Cursor",
+    "evidenceClass": "source-grounded",
+    "requiresBinaries": [],
+    "promptBudgetKey": null,
+    "modelConfigKey": null,
+    "handler": null
   }
 }

@@ -23,6 +23,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { readWorkflowCombined } = require('./helpers.cjs');
 
 const WORKFLOW_PATH = path.join(
   __dirname,
@@ -31,6 +32,21 @@ const WORKFLOW_PATH = path.join(
   'workflows',
   'plan-phase.md'
 );
+
+/**
+ * plan-phase.md was fragmented (#2993) into gsd-core/workflows/plan-phase/steps/*.md.
+ * Content this drift guard asserts on may now live in the host file, an extracted
+ * step file, or be split across both (e.g. a rule-label count). Guards that need to
+ * see the full picture read this combined blob instead of `workflow` alone so they
+ * don't go blind the next time a section moves out of the host. Delegates to the
+ * shared tests/helpers.cjs readWorkflowCombined() — kept as a same-named local
+ * wrapper so every existing call site here is unchanged (Generative Fix Divergence:
+ * this was the original implementation, now promoted to a shared helper so
+ * tests/fix-2650-plan-phase-stall-detection.test.cjs doesn't need a second copy).
+ */
+function readPlanPhaseCombined() {
+  return readWorkflowCombined(WORKFLOW_PATH);
+}
 
 // ─── Fixture ──────────────────────────────────────────────────────────────────
 
@@ -185,11 +201,15 @@ describe('plan-phase workflow: top-level spawn guard (#913)', () => {
   });
 
   test('workflow contains ALL RUNTIMES orchestrator rule labels (count preserved)', () => {
-    // Must have all 7 agent-spawn wait rules still present (none dropped during rename)
-    const allRuntimesCount = (workflow.match(/ORCHESTRATOR RULE — ALL RUNTIMES/g) || []).length;
+    // Must have all 7 agent-spawn wait rules still present (none dropped during rename).
+    // #2993 fragmentization moved some spawn sites (e.g. chunked planning) into
+    // gsd-core/workflows/plan-phase/steps/*.md, so the count is taken across the
+    // host file AND every extracted step file — not the host alone.
+    const combined = readPlanPhaseCombined();
+    const allRuntimesCount = (combined.match(/ORCHESTRATOR RULE — ALL RUNTIMES/g) || []).length;
     assert.ok(
       allRuntimesCount >= 7,
-      `plan-phase must have at least 7 "ORCHESTRATOR RULE — ALL RUNTIMES" labels (one per agent spawn site); found ${allRuntimesCount} (#913)`
+      `plan-phase (host + plan-phase/steps/*.md) must have at least 7 "ORCHESTRATOR RULE — ALL RUNTIMES" labels (one per agent spawn site); found ${allRuntimesCount} (#913)`
     );
   });
 });
@@ -780,12 +800,17 @@ describe('plan-phase.md — chunked mode flag and config (#2310)', () => {
 });
 
 describe('plan-phase.md — chunked mode implementation (#2310)', () => {
-  const content = fs.readFileSync(PLAN_PHASE, 'utf-8');
+  // #2993 fragmentization moved §8.5 (chunked planning mode) out of the host file
+  // into gsd-core/workflows/plan-phase/steps/chunked-planning-mode.md. These
+  // assertions now read the combined host + step-files blob (readPlanPhaseCombined,
+  // defined at module scope) so they keep guarding the same property regardless of
+  // which file the content physically lives in.
+  const content = readPlanPhaseCombined();
 
   test('step 8.5 chunked planning section exists', () => {
     assert.ok(
       content.includes('## 8.5.'),
-      'plan-phase.md must have a step 8.5 section for chunked planning mode'
+      'plan-phase.md (or its extracted plan-phase/steps/*.md) must have a step 8.5 section for chunked planning mode'
     );
   });
 
@@ -942,16 +967,22 @@ describe('enh #3209: plan-phase ADR ingest express path', () => {
     );
   });
 
+  // #2993 fragmentization moved the ADR ingest express-path step (former §3.6) out
+  // of the host file into gsd-core/workflows/plan-phase/steps/adr-ingest-express-path.md.
+  // These three tests read the combined host + step-files blob (readPlanPhaseCombined,
+  // defined at module scope) so they keep guarding the same property regardless of
+  // which file the content physically lives in.
+
   test('workflow defines an ADR ingest express-path step', () => {
-    const workflow = read(WORKFLOW_PATH);
+    const workflow = readPlanPhaseCombined();
     assert.ok(/##\s*(?:\d+(?:\.\d+)*)?\.?\s*Handle ADR Ingest Express Path/i.test(workflow),
-      'plan-phase workflow must include a dedicated ADR ingest express-path step');
+      'plan-phase workflow (host + plan-phase/steps/*.md) must include a dedicated ADR ingest express-path step');
     assert.ok(workflow.includes('ADR Ingest Express Path'),
       'workflow must display ADR ingest express-path banner text');
   });
 
   test('ADR ingest context template includes scope fence and ADR source attribution', () => {
-    const workflow = read(WORKFLOW_PATH);
+    const workflow = readPlanPhaseCombined();
     assert.ok(workflow.includes('<scope_fence>'),
       'ADR ingest context template must include <scope_fence> for hard out-of-scope exclusions');
     assert.ok(workflow.includes('Source:** ADR Ingest Express Path'),
@@ -959,7 +990,7 @@ describe('enh #3209: plan-phase ADR ingest express path', () => {
   });
 
   test('workflow documents status gate and no-decisions fallback', () => {
-    const workflow = read(WORKFLOW_PATH);
+    const workflow = readPlanPhaseCombined();
     assert.ok(
       workflow.includes('Reject `superseded`/`rejected`/`deprecated`') ||
       workflow.includes('reject `superseded`/`rejected`/`deprecated`') ||
@@ -1130,12 +1161,22 @@ describe('feat-22-surfacing-docs', () => {
   });
 
   test('new-project workflow has Drift Guard default-yes option', () => {
-    const content = fs.readFileSync(NEW_PROJECT_PATH, 'utf-8');
+    // #2994 fragmentization moved the Step 2a auto-mode AI/Drift-Guard
+    // AskUserQuestion block (the sole holder of this exact phrasing, even
+    // pre-fragmentization — Step 5's interactive block uses different wording)
+    // out of new-project.md into
+    // gsd-core/workflows/new-project/steps/auto-mode-config.md. Read host +
+    // step combined so this count is preserved across the split.
+    const content = fs.readFileSync(NEW_PROJECT_PATH, 'utf-8') +
+      '\n' + fs.readFileSync(
+        path.join(ROOT, 'gsd-core', 'workflows', 'new-project', 'steps', 'auto-mode-config.md'),
+        'utf-8'
+      );
     // Both question blocks (auto and interactive) should have the yes option
     const count = (content.match(/Yes \(Recommended\).*catches hallucinated names/g) || []).length;
     assert.ok(
       count >= 1,
-      'new-project.md must have at least one Drift Guard "Yes (Recommended)" option'
+      'new-project.md (host + new-project/steps/*.md) must have at least one Drift Guard "Yes (Recommended)" option'
     );
   });
 
@@ -1604,25 +1645,26 @@ describe('plan-phase decision-coverage gate (#2492)', () => {
     assert.ok(decIdx < commitIdx, 'Decision gate must run before commit so failures block the commit');
   });
 
-  test('plan-phase Decision Coverage Gate uses CONTEXT_PATH variable defined in INIT extraction (review F1)', () => {
-    // The CONTEXT_PATH bash variable is defined at Step 4 (`CONTEXT_PATH=$(_gsd_field "$INIT" context_path)`).
-    // The plan-phase gate snippet must reference the same casing — `${CONTEXT_PATH}` — not `${context_path}`,
-    // otherwise the BLOCKING gate is invoked with an empty path and silently skips.
-    const defIdx = md.indexOf('CONTEXT_PATH=$(_gsd_field "$INIT" context_path)');
-    assert.ok(defIdx !== -1, 'CONTEXT_PATH must be defined from INIT JSON');
-
+  test('plan-phase Decision Coverage Gate recomputes CONTEXT_PATH in-block and guards the empty-glob case (#2770)', () => {
+    // #2770: the CONTEXT_PATH set in the step-1 init Bash block does NOT survive into
+    // the separately-spawned gate block, so the gate used to run with an empty arg and
+    // silently green-skip. The gate must now (a) recompute CONTEXT_PATH locally from the
+    // phase dir, and (b) guard the empty case so a genuinely CONTEXT.md-less phase still
+    // skips (the handler now fails closed on an empty arg, so an unguarded empty path
+    // would hard-halt the legitimate "Continue without context" flow).
     const gateIdx = md.indexOf('check.decision-coverage-plan');
     assert.ok(gateIdx !== -1, 'check.decision-coverage-plan invocation must exist');
 
-    // Slice the surrounding gate snippet (~600 chars) and verify variable casing matches the definition.
-    const snippet = md.slice(Math.max(0, gateIdx - 200), gateIdx + 400);
+    // The gate invocation is now nested inside the empty-glob guard, so slice a wide
+    // window around it to capture both the recompute and the guard.
+    const snippet = md.slice(Math.max(0, gateIdx - 600), gateIdx + 400);
     assert.ok(
-      snippet.includes('${CONTEXT_PATH}'),
-      'Gate snippet must reference ${CONTEXT_PATH} (uppercase) to match the variable defined in Step 4',
+      snippet.includes('CONTEXT_PATH=$(ls "${PHASE_DIR}"/*-CONTEXT.md'),
+      'Gate must recompute CONTEXT_PATH in-block from the phase-dir glob (not rely on the init-block variable) (#2770)',
     );
     assert.ok(
-      !snippet.includes('${context_path}'),
-      'Gate snippet must NOT reference ${context_path} (lowercase) — that name is undefined in shell scope',
+      snippet.includes('if [ -n "$CONTEXT_PATH" ]'),
+      'Gate must guard the empty-glob case so a CONTEXT.md-less phase still skips (handler now fails closed on empty arg) (#2770)',
     );
   });
 

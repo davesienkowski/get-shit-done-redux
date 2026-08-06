@@ -23,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { resolveRuntimeArtifactLayout, findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
 const installProfiles = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { install } = require('../bin/install.js');
 const { createTempDir, cleanup } = require('./helpers.cjs');
@@ -64,11 +65,11 @@ describe('resolveRuntimeArtifactLayout — claude global', () => {
 });
 
 describe('resolveRuntimeArtifactLayout — cursor', () => {
-  test('returns correct layout for cursor — skills + commands + agents kinds (#785, ADR-1235)', () => {
+  test('returns correct layout for cursor — skills + agents only (#2644)', () => {
     const layout = resolveRuntimeArtifactLayout('cursor', FAKE_DIR);
     assert.strictEqual(layout.runtime, 'cursor');
     assert.strictEqual(layout.configDir, FAKE_DIR);
-    assert.strictEqual(layout.kinds.length, 3);
+    assert.strictEqual(layout.kinds.length, 2);
 
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'must have a skills kind');
@@ -76,11 +77,8 @@ describe('resolveRuntimeArtifactLayout — cursor', () => {
     assert.strictEqual(skillsKind.prefix, 'gsd-');
     assert.strictEqual(typeof skillsKind.stage, 'function');
 
-    const commandsKind = layout.kinds.find(k => k.kind === 'commands');
-    assert.ok(commandsKind, 'must have a commands kind (#785 Cursor 1.6 slash commands)');
-    assert.strictEqual(commandsKind.destSubpath, 'commands');
-    assert.strictEqual(commandsKind.prefix, 'gsd-');
-    assert.strictEqual(typeof commandsKind.stage, 'function');
+    assert.equal(layout.kinds.find(k => k.kind === 'commands'), undefined,
+      'Cursor skills are the sole slash-menu surface; commands would duplicate them (#2644)');
 
     const agentsKind = layout.kinds.find(k => k.kind === 'agents');
     assert.ok(agentsKind, 'must have an agents kind (ADR-1235 §1 descriptor cutover)');
@@ -119,6 +117,19 @@ describe('resolveRuntimeArtifactLayout — codex', () => {
     assert.ok(skills.home.includes('.agents'),
       'codex global skills home should point to .agents directory');
   });
+});
+
+test('keeps every built-in local artifact layout project-scoped (#2777)', () => {
+  for (const [runtime, descriptor] of Object.entries(capabilityRegistry.runtimes)) {
+    const localEntries = descriptor.runtime?.artifactLayout?.local ?? [];
+    for (const entry of localEntries) {
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(entry, 'home'),
+        false,
+        `${runtime} local artifact layout entry '${entry.kind}' must not declare home`,
+      );
+    }
+  }
 });
 
 describe('resolveRuntimeArtifactLayout — copilot', () => {
@@ -402,11 +413,11 @@ describe('resolveRuntimeArtifactLayout edge-cases', () => {
     assert.ok(kindNames.includes('agents'), 'should have agents kind');
   });
 
-  test('cursor has both skills and commands kinds (#785)', () => {
+  test('cursor has a skills kind and no commands kind (#2644)', () => {
     const layout = resolveRuntimeArtifactLayout('cursor', '/tmp/x');
     const kindNames = layout.kinds.map(k => k.kind);
     assert.ok(kindNames.includes('skills'), 'cursor must have skills kind');
-    assert.ok(kindNames.includes('commands'), 'cursor must have commands kind (#785 Cursor 1.6)');
+    assert.ok(!kindNames.includes('commands'), 'cursor commands kind would duplicate skill menu entries');
   });
 
   test('claude global has only skills kind', () => {
@@ -643,39 +654,11 @@ describe('stage — opencode/kilo skills kind (#784)', () => {
   }
 });
 
-describe('stage — cursor commands kind (#785)', () => {
-  test('cursor commands kind stage returns directory with converted .md files', () => {
+describe('stage — cursor retired commands kind (#2644)', () => {
+  test('cursor layout exposes no commands staging surface', () => {
     const layout = resolveRuntimeArtifactLayout('cursor', FAKE_STAGE_DIR);
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
-    assert.ok(commandsKind, 'cursor should have a commands kind (#785)');
-
-    const stagedDir = commandsKind.stage(PROFILE_CORE);
-    assert.ok(fs.existsSync(stagedDir), 'stagedDir must exist');
-
-    const entries = fs.readdirSync(stagedDir).filter(f => f.endsWith('.md'));
-    assert.ok(entries.length >= 1, 'at least one command file should be staged');
-
-    // Cursor commands are plain markdown — no YAML frontmatter
-    for (const entry of entries) {
-      const content = fs.readFileSync(path.join(stagedDir, entry), 'utf8');
-      assert.ok(!content.startsWith('---'), `${entry}: cursor commands must not start with YAML frontmatter`);
-    }
-  });
-
-  test('cursor commands stage applies Cursor-specific content transforms', () => {
-    const layout = resolveRuntimeArtifactLayout('cursor', FAKE_STAGE_DIR);
-    const commandsKind = layout.kinds.find(k => k.kind === 'commands');
-    assert.ok(commandsKind, 'cursor should have a commands kind (#785)');
-
-    const stagedDir = commandsKind.stage(PROFILE_FULL);
-    assert.ok(fs.existsSync(stagedDir), 'stagedDir must exist');
-
-    // Verify all staged files are .md only (no subdirectory SKILL.md layout)
-    const entries = fs.readdirSync(stagedDir, { withFileTypes: true });
-    for (const entry of entries) {
-      assert.ok(entry.isFile(), `${entry.name}: cursor commands dir must contain only flat files`);
-      assert.ok(entry.name.endsWith('.md'), `${entry.name}: must be .md file`);
-    }
+    assert.equal(commandsKind, undefined);
   });
 });
 
@@ -934,5 +917,145 @@ describe('#1477 .gsd-source marker provisioning', () => {
       const resolved = findInstallSourceRoot(cfgDir);
       assert.equal(path.resolve(resolved), path.resolve(REPO_ROOT, 'commands', 'gsd'));
     });
+  });
+});
+
+// ─── #2624: stale .gsd-source marker read before rewrite on upgrade ──────────
+//
+// Regression for #2624: a Claude-global upgrade silently installed skill content
+// from the PREVIOUS version. findInstallSourceRoot prefers <configDir>/.gsd-source,
+// and install() used to REWRITE that marker AFTER staging had already read it — so
+// on an upgrade the marker still pointed at the prior version's source (an npx
+// cache dir that still exists on disk) and every converted skill was generated from
+// the OLD commands/gsd. Fix: write the marker BEFORE staging reads it.
+//
+// These exercise the real install(true, 'claude') with HOME redirected to a tmp dir,
+// pre-seeding a STALE marker that points at a different (still-existing) source —
+// the exact upgrade condition. No live npx / network.
+describe('#2624 .gsd-source marker is rewritten before staging reads it', () => {
+  let tmpRoot;
+  let savedHome;
+  let savedUserProfile;
+  let savedExplicitConfigDir;
+  let savedTestMode;
+
+  // Run install() with process.exit and console output mocked via t.mock (auto-restored),
+  // per CONTRIBUTING.md test rules (no manual monkeypatch / try-finally in test bodies).
+  // process.exit during install is a hard failure — surface it, don't let it kill the runner.
+  function runInstall(t, isGlobal, runtime) {
+    t.mock.method(process, 'exit', (code) => {
+      throw new Error(`process.exit(${code}) during install — should not happen`);
+    });
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'warn', () => {});
+    t.mock.method(console, 'error', () => {});
+    return install(isGlobal, runtime);
+  }
+
+  beforeEach(() => {
+    tmpRoot = createTempDir('gsd-2624-');
+    savedHome = process.env.HOME;
+    savedUserProfile = process.env.USERPROFILE;
+    process.env.HOME = tmpRoot;
+    process.env.USERPROFILE = tmpRoot;
+    savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
+    delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    savedTestMode = process.env.GSD_TEST_MODE;
+    process.env.GSD_TEST_MODE = '1';
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedUserProfile;
+    if (savedExplicitConfigDir === undefined) delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    else process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
+    if (savedTestMode === undefined) delete process.env.GSD_TEST_MODE;
+    else process.env.GSD_TEST_MODE = savedTestMode;
+    cleanup(tmpRoot);
+  });
+
+  // The current package's commands/gsd — what the marker MUST point at after install.
+  const CURRENT_SOURCE = path.join(REPO_ROOT, 'commands', 'gsd');
+
+  test('claude-global install overwrites a stale .gsd-source marker before staging reads it', (t) => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+
+    // Simulate the PREVIOUS install's marker: a different source dir that STILL EXISTS
+    // on disk (mirroring a coexisting npx per-version cache dir). findInstallSourceRoot
+    // returns this immediately if it is read before the marker is rewritten.
+    const staleSource = path.join(tmpRoot, 'old-npx-cache', 'commands', 'gsd');
+    fs.mkdirSync(staleSource, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, '.gsd-source'), staleSource + '\n', 'utf8');
+
+    // Spy on findInstallSourceRoot to capture WHICH source staging actually resolves.
+    // The marker ends up correct either way (the late write corrected it on the old code),
+    // so the marker content alone cannot prove the ordering — the resolved-source captures
+    // can. Before the fix, staging resolves the stale path; after, the current path.
+    // install-engine.cjs calls runtimeArtifactLayout.findInstallSourceRoot via the module
+    // object (not a captured ref), so mocking the property on the shared module instance
+    // intercepts the staging call. Same pattern as tests/phase.test.cjs (capture original,
+    // delegate).
+    const runtimeArtifactLayout = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+    const realFindInstallSourceRoot = runtimeArtifactLayout.findInstallSourceRoot;
+    const resolvedSources = [];
+    t.mock.method(runtimeArtifactLayout, 'findInstallSourceRoot', function (configDir) {
+      const result = realFindInstallSourceRoot.call(this, configDir);
+      resolvedSources.push(path.resolve(result));
+      return result;
+    });
+
+    runInstall(t, true /* isGlobal */, 'claude');
+
+    const markerPath = path.join(claudeDir, '.gsd-source');
+    assert.ok(fs.existsSync(markerPath), 'marker must exist after install');
+    const finalMarker = path.resolve(fs.readFileSync(markerPath, 'utf8').trim());
+    assert.equal(finalMarker, path.resolve(CURRENT_SOURCE),
+      `final marker must point at the current package source, not ${finalMarker}`);
+
+    // The decisive assertion: staging must NEVER have resolved the stale source. Before the
+    // fix, at least one staging resolution returned the stale path (read before rewrite).
+    const resolvedStale = resolvedSources.filter((p) => p === path.resolve(staleSource));
+    assert.equal(resolvedStale.length, 0,
+      `staging must not resolve the stale source during install, but did ${resolvedStale.length} time(s). ` +
+      `Resolved: ${JSON.stringify(resolvedSources)}`);
+  });
+
+  test('fresh claude-global install (no prior marker) still writes the correct marker', (t) => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // No pre-existing marker — fresh install (negative space, must stay correct).
+    runInstall(t, true /* isGlobal */, 'claude');
+
+    const markerPath = path.join(claudeDir, '.gsd-source');
+    assert.ok(fs.existsSync(markerPath), 'fresh claude-global install must write the marker');
+    const resolved = fs.readFileSync(markerPath, 'utf8').trim();
+    assert.equal(
+      path.resolve(resolved),
+      path.resolve(CURRENT_SOURCE),
+      'fresh install marker must point at the current package source',
+    );
+  });
+
+  test('claude-global install rewrites a marker pointing at a deleted (ghost) source', (t) => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // A ghost path that does NOT exist on disk — findInstallSourceRoot ignores it and
+    // falls through to walk-up, then install() rewrites the marker to the current source.
+    const ghost = path.join(tmpRoot, 'gone', 'commands', 'gsd');
+    fs.writeFileSync(path.join(claudeDir, '.gsd-source'), ghost + '\n', 'utf8');
+
+    runInstall(t, true /* isGlobal */, 'claude');
+
+    const markerPath = path.join(claudeDir, '.gsd-source');
+    assert.ok(fs.existsSync(markerPath), 'marker must exist after install');
+    const resolved = fs.readFileSync(markerPath, 'utf8').trim();
+    assert.equal(
+      path.resolve(resolved),
+      path.resolve(CURRENT_SOURCE),
+      'ghost marker must be rewritten to the current package source',
+    );
   });
 });
