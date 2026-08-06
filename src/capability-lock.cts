@@ -276,7 +276,11 @@ function _realIsPidAlive(pid: number): boolean {
 const _lockProbes: {
   isPidAlive: (pid: number) => boolean;
   getProcessStartTime: (pid: number) => string | null;
-} = { isPidAlive: _realIsPidAlive, getProcessStartTime };
+  // #48: the steal rename goes through this indirection so a unit test can inject a DETERMINISTIC
+  // lost-steal race (throw ENOENT on the first call) without spawning a real competing process. The
+  // default is the real bounded rename.
+  renameSteal: (fromPath: string, toPath: string) => void;
+} = { isPidAlive: _realIsPidAlive, getProcessStartTime, renameSteal: retryRenameSync };
 
 function isPidAlive(pid: number): boolean {
   return _lockProbes.isPidAlive(pid);
@@ -495,7 +499,23 @@ function acquireLock(lockPath: string, opts?: { maxAttempts?: number; waitForFre
 
     // Steal atomically (only one racer can rename the inode).
     const stolen = `${lockPath}.stale-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-    try { retryRenameSync(lockPath, stolen); } catch { return null; } // another process won the steal
+    try {
+      _lockProbes.renameSteal(lockPath, stolen);
+    } catch (renameErr) {
+      // #48: the steal rename LOST the race — another process already renamed the inode away, so our
+      // source no longer exists and retryRenameSync throws ENOENT (which it does not retry). This is the
+      // SAME "the holder changed under us" race as the sameLockInstance mismatch above, and the MORE
+      // COMMON outcome of two concurrent stealers, so back off and RETRY within the budget rather than
+      // returning null on the first lost race. Returning null here immediately violated the waitForFresh
+      // contract (a not-immediately-acquirable holder is waited for; null only once the budget is
+      // exhausted) and spuriously failed a contended consent write during crash-recovery. A non-race
+      // rename failure (any other errno) still returns null immediately, unchanged.
+      if ((renameErr as NodeJS.ErrnoException).code === 'ENOENT' && attempt + 1 < maxAttempts) {
+        lockBackoff();
+        continue;
+      }
+      return null;
+    }
     try { fs.rmSync(stolen, { force: true }); } catch { /* best-effort */ }
     if (attempt + 1 < maxAttempts) lockBackoff();
   }
@@ -551,12 +571,14 @@ export = {
   LOCK_MAX_BODY_BYTES,
   // Test seams (shared by capability-lifecycle's #1462 lock tests via re-export): inject deterministic
   // isPidAlive / getProcessStartTime so the start-time liveness branches are exercised without real pids.
-  _setLockProbes(probes: Partial<{ isPidAlive: (pid: number) => boolean; getProcessStartTime: (pid: number) => string | null }>): void {
+  _setLockProbes(probes: Partial<{ isPidAlive: (pid: number) => boolean; getProcessStartTime: (pid: number) => string | null; renameSteal: (fromPath: string, toPath: string) => void }>): void {
     if (typeof probes.isPidAlive === 'function') _lockProbes.isPidAlive = probes.isPidAlive;
     if (typeof probes.getProcessStartTime === 'function') _lockProbes.getProcessStartTime = probes.getProcessStartTime;
+    if (typeof probes.renameSteal === 'function') _lockProbes.renameSteal = probes.renameSteal;
   },
   _resetLockProbes(): void {
     _lockProbes.isPidAlive = _realIsPidAlive;
     _lockProbes.getProcessStartTime = getProcessStartTime;
+    _lockProbes.renameSteal = retryRenameSync;
   },
 };
