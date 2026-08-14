@@ -23,6 +23,7 @@ import {
   type Resolution,
   type CoverageReport,
   type Validators,
+  type ProbeDescriptor,
   validateRequirement as coreValidateRequirement,
   validateResolution as coreValidateResolution,
   analyzeCoverage as coreAnalyzeCoverage,
@@ -116,6 +117,24 @@ export const EDGE_VALIDATORS: Validators = {
   categories: [...TAXONOMY.map((c) => c.id), UNCLASSIFIED_CATEGORY],
   verification: ['explicit', 'backstop'],
   requiredFieldsByVerification: { explicit: ['resolution'], backstop: ['resolution'] },
+};
+
+/**
+ * The edge adapter's self-description (epic: probe self-description layer). References the existing
+ * constants — the closed `TAXONOMY` flattened to descriptor data (`applicableTo=shapes`, `question=probe`),
+ * `VALID_SHAPES` as the relevance vocabulary, and `EDGE_VALIDATORS.verification` composed as the tiers
+ * (ADR-550 D7c: reference the runtime validators, do not restate them). Deterministic propose.
+ * NOTE: `ProbeDescriptor` is the probe self-description — distinct from the ADR-1016 Runtime Capability
+ * Descriptor; it is never registered as a capability.
+ */
+export const EDGE_DESCRIPTOR: ProbeDescriptor = {
+  axis: 'edge',
+  title: 'Spec-completeness edge probe',
+  invoke: 'edge-probe.cjs',
+  proposeKind: 'deterministic',
+  relevance: { name: 'data/behavior shape', vocabulary: [...VALID_SHAPES] },
+  taxonomy: TAXONOMY.map((c) => ({ id: c.id, name: c.name, applicableTo: c.shapes, question: c.probe })),
+  verificationTiers: EDGE_VALIDATORS.verification,
 };
 
 /**
